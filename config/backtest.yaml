@@ -1,0 +1,112 @@
+# Backtest-wide configuration. Nothing here should be duplicated as a constant in code.
+
+account:
+  initial_capital_usd: 50.0
+  currency: USD
+
+instrument:
+  symbol: XAUUSD
+  # Standard spot gold contract. 1 lot = 100 troy ounces, so 0.01 lots = 1 oz.
+  contract_size_oz_per_lot: 100.0
+  min_lot: 0.01
+  lot_step: 0.01
+
+data:
+  base_resolution: 1min      # the ONLY resolution ever written to the cache as source
+  resolution: 15min          # resolution the backtest runs on (resampled from base)
+  start: "2019-01-01"
+  end: "2024-12-31"
+  adapter: synthetic         # synthetic | csv | parquet | dukascopy
+  cache_dir: data/cache
+  quarantine_dir: data/quarantine
+
+  quality:
+    sigma_threshold: 12.0    # flag a bar whose close is > N sigma from the prior close
+    sigma_window: 500
+    flag_zero_volume: true
+    max_flagged_fraction: 0.02   # abort the load if more than this fraction is flagged
+
+macro:
+  enabled: true
+  source: fred
+  series: [DFII10, DTWEXBGS, DGS10, T10YIE]
+  # Published values are lagged before being joined to intraday bars, then
+  # forward-filled only. One business day is the minimum defensible lag.
+  publication_lag_days: 1
+  cache_dir: data/cache/fred
+
+# The market calendar. Gold trades roughly Sun 22:00 UTC -> Fri 21:00 UTC with a
+# short daily break. Resampling must not invent bars across these gaps.
+session:
+  week_open_weekday: 6       # Sunday
+  week_open_time_utc: "22:00"
+  week_close_weekday: 4      # Friday
+  week_close_time_utc: "21:00"
+  daily_break_start_utc: "21:00"
+  daily_break_end_utc: "22:00"
+  rollover_hour_utc: 21      # financing is charged on positions held past this
+
+costs:
+  # Pessimistic by default. Every one of these makes results worse, never better.
+  spread_usd_per_oz_round_trip: 0.30
+  slippage_usd_per_oz_per_side: 0.10
+  commission_usd_per_lot_per_side: 0.0
+  # Financing on positions held past the rollover hour, USD per oz per night.
+  # Negative = a charge. Long gold normally pays.
+  swap_long_usd_per_oz_per_night: -0.15
+  swap_short_usd_per_oz_per_night: 0.05
+  # Spreads blow out overnight and around news. Multiplier applied to the spread
+  # only (not slippage) by UTC hour-of-day. Hours not listed use 1.0.
+  spread_session_multipliers:
+    "22": 2.5
+    "23": 2.5
+    "0": 2.0
+    "1": 2.0
+    "2": 1.8
+    "3": 1.8
+    "4": 1.8
+    "5": 1.5
+    "20": 1.5
+    "21": 3.0
+  # Extra multiplier applied in a window around scheduled news timestamps
+  # supplied to the cost model (empty by default).
+  news_spread_multiplier: 3.0
+  news_window_minutes: 15
+
+sizing:
+  mode: fixed              # fixed | vol_target | fixed_fractional
+  fixed_lots: 0.01
+  # vol_target mode
+  target_daily_vol_fraction: 0.01   # 1% of equity per day of P&L volatility
+  vol_lookback_bars: 96
+  # fixed_fractional mode
+  risk_fraction_per_trade: 0.01     # 1% of equity per stop-out
+  stop_atr_multiple: 2.0
+  atr_period: 14
+  # Loud warning threshold: % of equity at risk per 1 ATR of adverse movement.
+  risk_per_atr_warning_pct: 5.0
+
+execution:
+  # A signal generated on bar t fills at bar t+1 open, plus slippage, always
+  # against the trade. This is not configurable -- it is enforced in the engine.
+  fill: next_bar_open
+
+walk_forward:
+  enabled: true
+  mode: anchored           # anchored: in-sample window always starts at the beginning
+  in_sample_days: 365
+  out_of_sample_days: 90
+  min_in_sample_days: 365
+  # Bars dropped either side of a train/test boundary. Default (null) resolves to
+  # the strategy's maximum indicator lookback.
+  embargo_bars: null
+
+random_benchmark:
+  n_runs: 1000
+  seed: 20240101
+  percentile_threshold: 95
+
+reporting:
+  output_dir: reports
+  write_trade_log: true
+  write_plots: true
