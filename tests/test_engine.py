@@ -194,6 +194,13 @@ def test_fixed_fractional_sizing_scales_with_equity(cfg, dataset):
     result = run_backtest(dataset, RESEARCH_STRATEGIES["trend_donchian"](), cfg,
                           initial_capital=5_000_000.0, sizer=sizer)
     assert len(result.trades) > 0
-    risked = result.trades["risk_usd"] / 5_000_000.0
-    # Every trade risks at most the configured 1%, allowing for lot rounding.
-    assert risked.max() <= 0.011
+
+    # The budget is a fraction of equity at the time of the trade, not of the
+    # starting capital, so the denominator has to be the equity the sizer saw:
+    # the previous bar close mark.
+    equity_at_entry = result.equity_net.shift(1).reindex(result.trades["entry_time"])
+    risked = result.trades["risk_usd"].to_numpy() / equity_at_entry.to_numpy()
+    assert np.nanmax(risked) <= 0.0105
+
+    # And sizing genuinely tracks equity rather than being constant.
+    assert result.trades["size_oz"].nunique() > 1
