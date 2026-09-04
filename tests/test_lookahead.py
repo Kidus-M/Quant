@@ -154,12 +154,12 @@ def test_fill_is_next_bar_open(cfg):
 
     assert len(result.trades) == 1
     trade = result.trades.iloc[0]
-    # Signal turns on at bar 3, so the fill is the OPEN of bar 4.
+    # The signal is +1 on bars 3, 4 and 5. Each decision executes one bar later,
+    # so the position runs from the open of bar 4 to the open of bar 7.
     assert trade["entry_time"] == bars.index[4]
     assert trade["entry_price_raw"] == pytest.approx(bars["open"].iloc[4])
-    # Signal turns off after bar 5, so the exit is the OPEN of bar 6.
-    assert trade["exit_time"] == bars.index[6]
-    assert trade["exit_price_raw"] == pytest.approx(bars["open"].iloc[6])
+    assert trade["exit_time"] == bars.index[7]
+    assert trade["exit_price_raw"] == pytest.approx(bars["open"].iloc[7])
 
 
 def test_fill_is_never_the_signal_bar_close(cfg):
@@ -279,7 +279,9 @@ def test_macro_is_lagged_by_at_least_one_day():
     """A value stamped for day d must not be visible to a bar on day d."""
     days = pd.DatetimeIndex(["2023-06-05", "2023-06-06", "2023-06-07"])
     series = pd.Series([1.0, 2.0, 3.0], index=days, name="DFII10")
-    bars = make_bars([1800.0] * 96, start="2023-06-06 00:00", freq="1h")
+    # Two days of bars: 6 and 7 June. The print stamped 7 June only becomes
+    # available on 8 June, which is past the end of this window.
+    bars = make_bars([1800.0] * 48, start="2023-06-06 00:00", freq="1h")
 
     joined = join_macro_to_bars(bars, series, lag_days=1)
     on_the_sixth = joined.loc["2023-06-06", "DFII10"]
