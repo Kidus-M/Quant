@@ -20,11 +20,32 @@ data:
   cache_dir: data/cache
   quarantine_dir: data/quarantine
 
+  # Adapter-specific settings. Only the section for data.adapter is read.
+  synthetic:
+    seed: 7
+    start_price: 1800.0
+    annual_vol: 0.15
+    annual_drift: 0.0
+  csv:
+    path: data/raw
+    source_timezone: UTC     # stated, never guessed
+    timestamp_column: null
+    timestamp_format: null
+  dukascopy:
+    max_workers: 8
+
   quality:
-    sigma_threshold: 12.0    # flag a bar whose close is > N sigma from the prior close
+    sigma_threshold: 12.0    # flag a bar whose close moves > N sigma vs prior bars
     sigma_window: 500
-    flag_zero_volume: true
-    max_flagged_fraction: 0.02   # abort the load if more than this fraction is flagged
+    # Structural failures (duplicates, non-positive prices, high<low, bars stamped
+    # outside session hours) are always dropped and written to quarantine.
+    drop_outside_session: true
+    # Suspicious-but-plausible bars are kept by default. Gold really does gap on a
+    # CPI print, and deleting the bars that hurt is the most flattering thing a
+    # backtester can do to itself. Flip these only with a reason.
+    quarantine_zero_volume: false
+    quarantine_price_spikes: false
+    max_flagged_fraction: 0.02   # abort the load if more than this fraction is dropped
 
 macro:
   enabled: true
