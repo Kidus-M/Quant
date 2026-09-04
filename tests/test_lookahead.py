@@ -118,13 +118,16 @@ def test_truncation_guard_catches_deliberate_cheats(cheat, bars_15m):
 def test_one_bar_lookahead_cheat_produces_an_absurd_result(dataset, cfg):
     """Sanity anchor: a strategy that knows the next bar makes impossible money.
 
-    This is what a lookahead bug looks like from the outside, and it is worth
-    having the number in the test suite so the shape is recognisable.
+    A one-bar oracle captures nearly every close-to-close move in the sample, in
+    both directions, and wins almost every trade. That signature -- P&L of the
+    same order as the total absolute movement of the instrument -- is what a
+    lookahead bug looks like from the outside, and it is worth having in the test
+    suite so the shape is recognisable.
     """
-    honest = run_backtest(dataset, RESEARCH_STRATEGIES["trend_donchian"](), cfg,
-                          initial_capital=100_000.0)
     cheat = run_backtest(dataset, LookaheadCheatStrategy(), cfg, initial_capital=100_000.0)
-    assert cheat.gross_pnl > 50 * abs(honest.gross_pnl)
+    total_movement = float(dataset.bars["close"].diff().abs().sum())   # per ounce
+    assert cheat.gross_pnl > 0.5 * total_movement
+    assert (cheat.trades["gross_pnl"] > 0).mean() > 0.8
 
 
 # ---------------------------------------------------------------------- #

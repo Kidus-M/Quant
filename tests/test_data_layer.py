@@ -315,3 +315,28 @@ def test_synthetic_series_has_real_session_gaps(minute_bars):
     being tested against a series where it costs nothing."""
     gaps = minute_bars["open"].to_numpy()[1:] - minute_bars["close"].to_numpy()[:-1]
     assert (np.abs(gaps) > 1e-9).sum() > 10
+
+
+def test_synthetic_generator_is_reproducible_across_processes():
+    """The seed must not depend on anything that varies between runs.
+
+    Seeding from Python ``hash()`` of the symbol is the trap: string hashing is
+    randomised per process, so the "deterministic" generator quietly produces
+    different bars every run and no result is reproducible. These are golden
+    values; if they change, the seeding changed.
+    """
+    adapter = SyntheticAdapter(seed=7, calendar=SessionCalendar())
+    bars = adapter.fetch("XAUUSD", pd.Timestamp("2023-01-01", tz="UTC"),
+                         pd.Timestamp("2023-01-05", tz="UTC"))
+    assert len(bars) == 4261
+    assert float(bars["close"].iloc[0]) == pytest.approx(1784.650638, abs=1e-6)
+    assert float(bars["close"].iloc[-1]) == pytest.approx(1828.606307, abs=1e-6)
+
+
+def test_different_symbols_get_different_synthetic_series():
+    adapter = SyntheticAdapter(seed=7, calendar=SessionCalendar())
+    start = pd.Timestamp("2023-01-01", tz="UTC")
+    end = pd.Timestamp("2023-01-05", tz="UTC")
+    gold = adapter.fetch("XAUUSD", start, end)
+    silver = adapter.fetch("XAGUSD", start, end)
+    assert not np.allclose(gold["close"].to_numpy(), silver["close"].to_numpy())
