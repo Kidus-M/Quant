@@ -181,7 +181,6 @@ def run_backtest(
 
     forced_min_lot = 0
     skipped_unaffordable = 0
-    skipped_no_equity = 0
     ruin_index: int | None = None
 
     for i in range(n):
@@ -191,8 +190,17 @@ def run_backtest(
         if rollovers[i] > 0:
             portfolio.accrue_financing(int(rollovers[i]))
 
-        # 2. execute the decision made at bar i-1, at this bar open
-        desired = int(target_arr[i])
+        # Stop-out is checked here as well as after the mark, because a financing
+        # charge can be what takes the account to zero. Checking in only one place
+        # leaves a bar in which a broke account can still open a trade.
+        if ruin_index is None and portfolio.net_equity <= 0:
+            ruin_index = i
+
+        # 2. execute the decision made at bar i-1, at this bar open.
+        #    A ruined account is stopped out and stays out: a broker closes the
+        #    position when equity reaches zero, and there is no more money to open
+        #    another. Modelling a recovery from zero equity would be fiction.
+        desired = 0 if ruin_index is not None else int(target_arr[i])
         if desired != portfolio.direction:
             fill_price = open_px[i]
             if portfolio.is_open:
@@ -222,8 +230,6 @@ def run_backtest(
                         reason="signal_entry",
                         min_lot_forced=decision.min_lot_forced,
                     )
-                elif portfolio.net_equity <= 0:
-                    skipped_no_equity += 1
                 else:
                     skipped_unaffordable += 1
 
@@ -268,12 +274,10 @@ def run_backtest(
         warnings.append(
             f"ACCOUNT RUINED: net equity reached zero on {ruin_time}, "
             f"{(ruin_time - index[0]).days} days in, after {n_before} trades. "
-            "Everything past that point is arithmetic, not a tradeable result."
+            "The position was closed at the next open and no further trades were "
+            "taken, which is what a broker stop-out actually does."
         )
-    if skipped_no_equity:
-        warnings.append(
-            f"{skipped_no_equity} entries after that point were skipped for having no equity to trade"
-        )
+
 
     equity_series = pd.Series(equity_net, index=index, name="equity_net")
 
