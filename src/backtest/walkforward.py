@@ -263,6 +263,10 @@ class WalkForward:
         warnings: list[str] = []
         running_capital = self.capital
         total_trials = 0
+        # Consecutive folds share a boundary timestamp (one test window ends where
+        # the next begins). Tracking the last bar already emitted keeps the
+        # stitched curve strictly increasing instead of double-counting that bar.
+        last_emitted: pd.Timestamp | None = None
 
         for number, (train_start, train_end, test_start, test_end) in enumerate(boundaries, start=1):
             train_mask = (index >= train_start) & (index < train_end)
@@ -320,6 +324,12 @@ class WalkForward:
             )
 
             keep = result.equity_net.index >= test_start
+            if last_emitted is not None:
+                keep &= result.equity_net.index > last_emitted
+            if not keep.any():
+                warnings.append(f"fold {number}: no new out-of-sample bars, skipped")
+                continue
+            last_emitted = result.equity_net.index[keep].max()
             equity_pieces.append(result.equity_net[keep])
             cost_pieces.append(result.costs_cum[keep] - float(result.costs_cum[keep].iloc[0]))
             if len(result.trades):
