@@ -114,21 +114,32 @@ def test_signals_are_in_the_allowed_set(name, bars_15m):
     assert set(np.unique(signals.to_numpy())) <= {-1, 0, 1}
 
 
-@pytest.mark.parametrize("name", sorted(RESEARCH_STRATEGIES))
-def test_max_lookback_is_declared_honestly(name, bars_15m):
-    """Signals must be flat, or at least computable, only after the warm-up.
+def _macro_frame(bars):
+    from src.data.fred import join_macro_to_bars
 
-    Understating the lookback leaks across the walk-forward seam, because the
-    embargo defaults to this number.
+    days = pd.date_range(bars.index[0].normalize() - pd.Timedelta(days=300),
+                         bars.index[-1].normalize(), freq="B")
+    series = pd.Series(np.linspace(2.0, 1.0, len(days)), index=days, name="DFII10")
+    return join_macro_to_bars(bars, series, lag_days=1)
+
+
+@pytest.mark.parametrize("name", sorted(RESEARCH_STRATEGIES))
+def test_max_lookback_covers_every_indicator_warmup(name, bars_15m):
+    """Every price feature must be fully formed by bar ``max_lookback``.
+
+    Understating this number leaks across the walk-forward seam, because the
+    purge and embargo lengths default to it.
     """
     strategy = RESEARCH_STRATEGIES[name]()
     lookback = strategy.max_lookback
     assert lookback >= 0
-    if lookback:
-        for column, values in strategy.compute_features(bars_15m.iloc[:lookback], None).items():
-            if column.startswith("macro"):
-                continue
-            assert values.isna().all() or column == "atr", column
+    macro = _macro_frame(bars_15m) if strategy.requires_macro else None
+    features = strategy.compute_features(bars_15m, macro)
+    warm = features.iloc[lookback:]
+    for column in features.columns:
+        if column.startswith("macro"):
+            continue   # macro warm-up is set by the publication history, not by bars
+        assert warm[column].notna().all(), f"{column} is still warming up after {lookback} bars"
 
 
 def test_rsi2_holds_until_its_own_exit_fires(bars_15m):
