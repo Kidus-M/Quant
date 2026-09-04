@@ -1,6 +1,6 @@
 """Vectorised evaluator, used only where the event loop would be too slow.
 
-The random benchmark runs a thousand backtests. At tens of thousands of bars each,
+The random benchmark runs a thousand backtests. At tens of thousands of bars each
 the Python event loop would take minutes; this takes seconds.
 
 Two code paths computing P&L is a genuine risk: they drift, and the fast one
@@ -19,6 +19,12 @@ The P&L identity, for position ``p[i]`` held from the open of bar ``i``::
 
 which is the telescoped form of marking each held segment from entry open to exit
 open, with the current bar marked to its close.
+
+Reproducing the stop-out exactly is the fiddly part, because the engine looks at
+equity three times per bar: after financing, again at the moment it sizes an entry
+(which happens *after* any closing trade on the same bar has been realised), and
+finally at the mark. On a $50 account those three moments genuinely differ, so all
+three are reconstructed here.
 """
 from __future__ import annotations
 
@@ -39,11 +45,10 @@ class FastResult:
     position_oz: np.ndarray
     ruin_index: int | None
     n_trades: int
-    ruin_before_execution: bool = False
-
-    @property
-    def net_pnl(self) -> float:
-        return float(self.equity_net[-1] - self.equity_net[0] + 0.0)
+    # True when the account went under before or during execution, in which case
+    # the ruin bar itself is already flat; False when it went under at the mark,
+    # which flattens from the following bar.
+    flat_from_ruin_bar: bool = False
 
 
 def run_fast(
@@ -87,28 +92,31 @@ def run_fast(
             _rollovers[1:] = calendar.rollovers_between(index[:-1], index[1:])
 
     position = np.asarray(target, dtype="float64") * float(size_oz)
-    result = _evaluate(
-        position, open_px, close_px, _cost_per_oz, _rollovers,
-        initial_capital, cost_model, size_oz,
-    )
-    if result.ruin_index is None:
-        return result
+    state = _evaluate(position, open_px, close_px, _cost_per_oz, _rollovers,
+                      initial_capital, cost_model)
 
-    # Stopped out. The engine checks equity twice per bar, so which bar the
-    # position is flattened on depends on where the account went under:
-    #   * before execution (a financing charge took it under): flatten at THIS
-    #     bar open, because the engine refuses to trade on this bar at all
-    #   * at the mark (the close): flatten at the NEXT bar open
-    # Equity up to the ruin bar is unaffected by suppressing later positions, so
-    # the ruin index is stable and one re-evaluation is exact, not iterative.
-    r = result.ruin_index
+    ruin = _first_ruin(state, initial_capital)
+    if ruin is None:
+        return _as_result(state, position, None, False)
+
+    ruin_index, flat_from_ruin_bar = ruin
+    # Everything before the ruin bar is untouched by flattening what comes after,
+    # so the ruin index is stable and one re-evaluation is exact, not iterative.
     position = position.copy()
-    position[r + (0 if result.ruin_before_execution else 1):] = 0.0
-    return _evaluate(
-        position, open_px, close_px, _cost_per_oz, _rollovers,
-        initial_capital, cost_model, size_oz,
-        forced_ruin=r, forced_ruin_pre=result.ruin_before_execution,
-    )
+    position[ruin_index + (0 if flat_from_ruin_bar else 1):] = 0.0
+    state = _evaluate(position, open_px, close_px, _cost_per_oz, _rollovers,
+                      initial_capital, cost_model)
+    return _as_result(state, position, ruin_index, flat_from_ruin_bar)
+
+
+@dataclass
+class _State:
+    equity_net: np.ndarray
+    equity_gross: np.ndarray
+    costs_cum: np.ndarray
+    equity_pre_exec: np.ndarray
+    equity_at_entry: np.ndarray
+    entry_attempted: np.ndarray
 
 
 def _evaluate(
@@ -119,68 +127,104 @@ def _evaluate(
     rollovers: np.ndarray,
     initial_capital: float,
     cost_model: CostModel,
-    size_oz: float,
-    forced_ruin: int | None = None,
-    forced_ruin_pre: bool = False,
-) -> FastResult:
+) -> _State:
     n = position.size
+    contract = cost_model.contract_size_oz_per_lot
+    commission = cost_model.commission_usd_per_lot_per_side
+    prev_position = np.concatenate(([0.0], position[:-1]))
 
-    # Gross: each bar contributes the move from its open to the next open, and the
-    # currently-held position is marked from this bar open to this bar close.
+    # Gross P&L marked to each bar open (everything flat) and to each bar close.
     open_to_open = np.zeros(n, dtype="float64")
     open_to_open[:-1] = np.diff(open_px)
-    carried = np.concatenate(([0.0], np.cumsum(position[:-1] * open_to_open[:-1])))
-    gross_cum = carried + position * (close_px - open_px)
+    gross_at_open = np.concatenate(([0.0], np.cumsum(position[:-1] * open_to_open[:-1])))
+    gross_cum = gross_at_open + position * (close_px - open_px)
 
-    # Transaction costs at each position change, including the final liquidation.
-    delta = np.diff(position, prepend=0.0)
-    traded = np.abs(delta)
-    trade_cost = traded * cost_per_oz + (traded / cost_model.contract_size_oz_per_lot) * (
-        cost_model.commission_usd_per_lot_per_side
-    )
+    changed = position != prev_position
+    closed_oz = np.where(changed, np.abs(prev_position), 0.0)
+    opened_oz = np.where(changed, np.abs(position), 0.0)
+
+    def transact(quantity: np.ndarray) -> np.ndarray:
+        return quantity * cost_per_oz + (quantity / contract) * commission
+
+    close_cost = transact(closed_oz)
+    open_cost = transact(opened_oz)
+    trade_cost = close_cost + open_cost
     if position[-1] != 0.0:
-        # The engine closes an open position at the final close.
-        trade_cost[-1] += abs(position[-1]) * cost_per_oz[-1] + (
-            abs(position[-1]) / cost_model.contract_size_oz_per_lot
-        ) * cost_model.commission_usd_per_lot_per_side
+        # The engine liquidates any position still open at the final close.
+        trade_cost[-1] += transact(np.abs(position[-1:]))[0]
 
-    # Financing on the position carried into each bar, charged before execution.
-    carried_position = np.concatenate(([0.0], position[:-1]))
     swap_rate = np.where(
-        carried_position > 0,
+        prev_position > 0,
         cost_model.swap_long_usd_per_oz_per_night,
         cost_model.swap_short_usd_per_oz_per_night,
     )
-    financing = -swap_rate * np.abs(carried_position) * rollovers
+    financing = -swap_rate * np.abs(prev_position) * rollovers
 
     costs_cum = np.cumsum(trade_cost + financing)
     equity_gross = initial_capital + gross_cum
     equity_net = equity_gross - costs_cum
 
-    # Equity as the engine sees it at execution time: marked to the previous
-    # close, with this bar financing charge already taken.
-    equity_pre_exec = np.empty(n, dtype="float64")
-    equity_pre_exec[0] = initial_capital - financing[0]
-    equity_pre_exec[1:] = equity_net[:-1] - financing[1:]
+    # Equity at the two intra-bar moments the engine inspects.
+    costs_before_bar = np.concatenate(([0.0], costs_cum[:-1]))
+    # Before execution the mark still sits at the previous close, so this is
+    # simply the previous bar net equity less this bar financing charge.
+    equity_pre_exec = np.concatenate(
+        ([initial_capital - financing[0]], equity_net[:-1] - financing[1:])
+    )
+    # At the moment an entry is sized, any closing trade on this bar has already
+    # been realised at this bar open and its cost already paid.
+    equity_at_entry = (
+        initial_capital + gross_at_open - costs_before_bar - financing - close_cost
+    )
+    entry_attempted = changed & (position != 0.0)
 
-    if forced_ruin is not None:
-        ruin_index, ruin_pre = forced_ruin, forced_ruin_pre
-    else:
-        under = np.flatnonzero((equity_net <= 0) | (equity_pre_exec <= 0))
-        if under.size:
-            ruin_index = int(under[0])
-            ruin_pre = bool(equity_pre_exec[ruin_index] <= 0)
-        else:
-            ruin_index, ruin_pre = None, False
-
-    n_trades = int(np.count_nonzero((position != 0) & (np.diff(position, prepend=0.0) != 0)))
-
-    return FastResult(
+    return _State(
         equity_net=equity_net,
         equity_gross=equity_gross,
         costs_cum=costs_cum,
+        equity_pre_exec=equity_pre_exec,
+        equity_at_entry=equity_at_entry,
+        entry_attempted=entry_attempted,
+    )
+
+
+def _first_ruin(state: _State, initial_capital: float) -> tuple[int, bool] | None:
+    """Earliest bar at which the account is stopped out, and whether that bar is
+    already flat.
+
+    Three triggers, matching the three moments the engine checks:
+
+    * equity non-positive after financing, before execution
+    * equity non-positive at the instant an entry would be sized, which is after
+      any closing trade on the same bar has been realised
+    * equity non-positive at the mark
+
+    The first two flatten the ruin bar itself; the third flattens from the next
+    bar. An entry refused for want of equity is always immediately followed by a
+    non-positive mark on the same bar, so it is a stop-out rather than a skip.
+    """
+    flatten_here = (state.equity_pre_exec <= 0) | (
+        state.entry_attempted & (state.equity_at_entry <= 0)
+    )
+    flatten_next = state.equity_net <= 0
+    candidates = np.flatnonzero(flatten_here | flatten_next)
+    if not candidates.size:
+        return None
+    index = int(candidates[0])
+    return index, bool(flatten_here[index])
+
+
+def _as_result(
+    state: _State, position: np.ndarray, ruin_index: int | None, flat_from_ruin_bar: bool
+) -> FastResult:
+    changed = position != np.concatenate(([0.0], position[:-1]))
+    n_trades = int(np.count_nonzero(changed & (position != 0.0)))
+    return FastResult(
+        equity_net=state.equity_net,
+        equity_gross=state.equity_gross,
+        costs_cum=state.costs_cum,
         position_oz=position,
         ruin_index=ruin_index,
         n_trades=n_trades,
-        ruin_before_execution=ruin_pre,
+        flat_from_ruin_bar=flat_from_ruin_bar,
     )
