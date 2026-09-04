@@ -87,6 +87,34 @@ def load_config(path: str | Path) -> Config:
     return Config(parsed, path)
 
 
+def load_configs(*paths: str | Path) -> Config:
+    """Load several YAML files and deep-merge them left to right.
+
+    Used to layer ``config/alerts.yaml`` on top of ``config/backtest.yaml`` so the
+    phase 2 runner reads one merged view without the backtest config growing a
+    section it never uses.
+    """
+    if not paths:
+        raise ConfigError("load_configs needs at least one path")
+    merged: dict[str, Any] = {}
+    last: Path | None = None
+    for path in paths:
+        loaded = load_config(path)
+        merged = _deep_merge(merged, loaded.data)
+        last = loaded.source_path
+    return Config(merged, last)
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    out = _deep_copy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = _deep_copy(value)
+    return out
+
+
 def load_dotenv(path: str | Path = ".env") -> dict[str, str]:
     """Minimal .env reader. Values are placed in os.environ if not already set.
 
