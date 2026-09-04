@@ -406,6 +406,12 @@ class AlertRunner:
         )
 
     def _maybe_heartbeat(self, outcome: CheckOutcome, dataset, bars, now) -> None:
+        first_ever = self.store.last_heartbeat_epoch is None
+        if first_ever and not self.settings.send_startup_heartbeat:
+            # Record the time so the interval starts now rather than firing on the
+            # next pass anyway.
+            self.store.record_heartbeat(now.timestamp())
+            return
         if not self.store.heartbeat_due(interval_hours=self.settings.heartbeat_hours,
                                         now=now.timestamp()):
             return

@@ -8,6 +8,14 @@
     python run.py costs                      what the cost model implies, before any strategy
     python run.py risk                       what the configured account size can do
 
+Phase 2, paper signals only (notifies a human, never places an order):
+
+    python run.py alerts check               verify the Telegram credentials
+    python run.py alerts test                send one test message
+    python run.py alerts once                one pass, suitable for cron
+    python run.py alerts run                 poll on a loop
+    python run.py alerts state               show the deduplication state
+
 Everything is driven by config/backtest.yaml. Command line flags override single
 config keys so an experiment can be reproduced from the config file alone.
 """
@@ -27,7 +35,7 @@ from src.backtest.costs import CostModel  # noqa: E402
 from src.backtest.engine import run_backtest  # noqa: E402
 from src.backtest.sizing import PositionSizer, format_risk_warning  # noqa: E402
 from src.backtest.walkforward import WalkForward, parameter_sensitivity  # noqa: E402
-from src.config import load_config  # noqa: E402
+from src.config import load_config, load_configs  # noqa: E402
 from src.data.loader import load_dataset  # noqa: E402
 from src.reporting.summary import StrategyReport, write_report  # noqa: E402
 from src.strategies import RESEARCH_STRATEGIES  # noqa: E402
@@ -52,7 +60,11 @@ def yaml_scalar(text: str):
 
 
 def _load(args) -> tuple:
-    cfg = load_config(args.config)
+    paths = [args.config]
+    extra = getattr(args, "alerts_config", None)
+    if extra:
+        paths.append(extra)
+    cfg = load_configs(*paths) if len(paths) > 1 else load_config(paths[0])
     overrides = _parse_overrides(getattr(args, "set", []))
     if getattr(args, "start", None):
         overrides["data.start"] = args.start
@@ -213,6 +225,110 @@ def _print_console_summary(reports: list[StrategyReport]) -> None:
 
 
 # ---------------------------------------------------------------------- #
+# Phase 2: paper-signal alerting
+# ---------------------------------------------------------------------- #
+def _build_runner(args, *, dry_run: bool | None = None):
+    from src.alerts.runner import AlertRunner, AlertSettings
+
+    cfg = _load(args)
+    settings = AlertSettings.from_config(cfg)
+    if dry_run is not None:
+        settings.dry_run = dry_run
+    if getattr(args, "dry_run", False):
+        settings.dry_run = True
+    settings.validate()
+    return AlertRunner(cfg, settings=settings), cfg, settings
+
+
+def cmd_alerts(args) -> int:
+    from src.alerts.state import AlertStore
+    from src.alerts.telegram import TelegramClient, TelegramCredentials, TelegramError
+
+    action = args.action
+
+    if action == "check":
+        try:
+            credentials = TelegramCredentials.from_env()
+            username = TelegramClient(credentials).check_credentials()
+        except TelegramError as exc:
+            print(f"credentials NOT working: {exc}")
+            return 1
+        print(f"credentials OK: connected as @{username}")
+        print(f"chat id: {credentials.chat_id}")
+        return 0
+
+    if action == "state":
+        cfg = _load(args)
+        store = AlertStore.load(cfg.get("alerts.state_path", "data/alerts_state.json"))
+        print(f"state file: {store.path}")
+        print(f"checks run: {store.checks}")
+        print(f"last check: {_epoch(store.last_check_epoch)}")
+        print(f"last heartbeat: {_epoch(store.last_heartbeat_epoch)}")
+        print(f"messages in the last hour: {len(store.send_times)}")
+        if not store.setups:
+            print("no setups tracked yet")
+        for key, setup in sorted(store.setups.items()):
+            print(
+                f"  {key:<34} {setup.status:<8} alerts={setup.alert_count} "
+                f"level={setup.last_level} last={_epoch(setup.last_alert_epoch)}"
+            )
+        return 0
+
+    runner, cfg, settings = _build_runner(args)
+
+    if action == "test":
+        from src.alerts.formatter import format_heartbeat
+
+        text = format_heartbeat(
+            symbol=settings.symbol_label,
+            now=pd.Timestamp.now(tz="UTC"),
+            last_bar=None, bars_seen=0, checks=runner.store.checks,
+            strategy_states=[f"{name}: configured, not yet evaluated"
+                             for name in settings.strategies],
+            armed_setups=0, market_open=False,
+            evidence_note=settings.evidence_note, is_synthetic=False,
+        )
+        text = text.replace("Heartbeat</b>", "Test message</b>")
+        runner.client.send(text)
+        print("test message sent" + (" (dry run)" if settings.dry_run else ""))
+        return 0
+
+    if action == "once":
+        outcome = runner.check_once()
+        _print_alert_outcome(outcome)
+        return 1 if outcome.errors and not outcome.sent else 0
+
+    if action == "run":
+        runner.run_forever(
+            interval_seconds=args.interval,
+            max_iterations=args.max_iterations,
+        )
+        return 0
+
+    raise SystemExit(f"unknown alerts action {action!r}")
+
+
+def _epoch(value) -> str:
+    if not value:
+        return "never"
+    return pd.Timestamp(value, unit="s", tz="UTC").strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _print_alert_outcome(outcome) -> None:
+    print(f"last bar: {outcome.last_bar}")
+    print(f"market open: {outcome.market_open}   stale data: {outcome.stale}")
+    for state in outcome.strategy_states:
+        print(f"  {state}")
+    if outcome.sent:
+        for message in outcome.sent:
+            print(f"  sent {message.kind} ({message.key}), delivered={message.delivered}")
+    else:
+        print("  nothing to send")
+    for error in outcome.errors:
+        print(f"  error: {error}")
+
+
+# ---------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default="config/backtest.yaml")
@@ -251,6 +367,20 @@ def build_parser() -> argparse.ArgumentParser:
     walk.add_argument("--no-sensitivity", action="store_true")
     walk.add_argument("--benchmark-runs", type=int, default=None)
     walk.set_defaults(func=cmd_walkforward)
+
+    alerts = common(sub.add_parser(
+        "alerts",
+        help="phase 2 paper-signal alerting (notifies a human, never places an order)",
+    ))
+    alerts.add_argument("action", choices=["check", "test", "once", "run", "state"])
+    alerts.add_argument("--alerts-config", default="config/alerts.yaml")
+    alerts.add_argument("--interval", type=int, default=None,
+                        help="seconds between checks in run mode")
+    alerts.add_argument("--max-iterations", type=int, default=None,
+                        help="stop after this many passes; useful under a supervisor")
+    alerts.add_argument("--dry-run", action="store_true",
+                        help="format and log messages without contacting Telegram")
+    alerts.set_defaults(func=cmd_alerts)
     return parser
 
 
