@@ -304,3 +304,30 @@ def test_pure_noise_does_not_clear_the_deflated_sharpe_bar():
 def test_deflated_sharpe_needs_either_returns_or_summary_statistics():
     with pytest.raises(ValueError, match="provide either"):
         deflated_sharpe_ratio(n_trials=5)
+
+
+def test_warning_fires_on_daily_range_even_when_intraday_atr_squeaks_under():
+    """A short bar interval must not let a hopeless account pass.
+
+    A 15-minute ATR is a fraction of the daily range, so a 50 USD account can sit
+    just inside the 5%-per-ATR threshold while one ordinary day of gold movement
+    would still take more than half of it.
+    """
+    sizer = PositionSizer(mode="fixed", contract_size_oz_per_lot=100.0, min_lot=0.01,
+                          risk_fraction_per_trade=0.01, stop_atr_multiple=2.0)
+    diag = risk_diagnostics(equity=50.0, atr_usd_per_oz=2.4, position_oz=1.0, sizer=sizer,
+                            daily_range_usd_per_oz=28.0)
+    assert not diag.breaches_threshold          # 4.8% per ATR, inside the threshold
+    assert diag.below_minimum_viable_equity     # but 2,800 USD is needed
+    assert diag.needs_warning
+    text = "\n".join(format_risk_warning(diag))
+    assert "POSITION SIZING WARNING" in text
+    assert "56% of this account" in text
+
+
+def test_a_large_account_needs_no_warning_on_any_measure():
+    sizer = PositionSizer(mode="fixed", contract_size_oz_per_lot=100.0, min_lot=0.01,
+                          risk_fraction_per_trade=0.01, stop_atr_multiple=2.0)
+    diag = risk_diagnostics(equity=250_000.0, atr_usd_per_oz=2.4, position_oz=1.0, sizer=sizer,
+                            daily_range_usd_per_oz=28.0)
+    assert not diag.needs_warning

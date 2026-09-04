@@ -175,6 +175,30 @@ class RiskDiagnostics:
             and self.min_risk_per_atr_pct > self.warning_threshold_pct
         )
 
+    @property
+    def below_minimum_viable_equity(self) -> bool:
+        """Too small to follow the configured risk rule against an ordinary day.
+
+        The per-ATR checks above are measured at the trading resolution, so a
+        short bar interval can make a hopeless account look almost acceptable: a
+        15-minute ATR is a fraction of the daily range, and one ounce of gold
+        moving its usual daily distance is what actually ends a small account.
+        This check is resolution-independent and is why the warning fires on a
+        50 USD account regardless of which bar size the backtest happens to use.
+        """
+        return bool(
+            np.isfinite(self.min_viable_equity_daily_range_usd)
+            and self.equity < self.min_viable_equity_daily_range_usd
+        )
+
+    @property
+    def needs_warning(self) -> bool:
+        return (
+            self.breaches_threshold
+            or self.min_lot_unaffordable
+            or self.below_minimum_viable_equity
+        )
+
 
 def risk_diagnostics(
     *,
@@ -236,7 +260,7 @@ def format_risk_warning(diag: RiskDiagnostics) -> list[str]:
     to be readable by someone who skips the tables.
     """
     lines: list[str] = []
-    if not diag.breaches_threshold and not diag.min_lot_unaffordable:
+    if not diag.needs_warning:
         lines.append(
             f"Position risk: {diag.risk_per_atr_pct:.2f}% of equity per ATR "
             f"(ATR {diag.atr_usd_per_oz:.2f} USD/oz), within the "
@@ -256,6 +280,13 @@ def format_risk_warning(diag: RiskDiagnostics) -> list[str]:
         lines.append(
             f"A typical full daily range ({diag.daily_range_usd_per_oz:.2f} USD/oz) "
             f"is {diag.risk_per_daily_range_pct:.1f}% of the account."
+        )
+    if diag.below_minimum_viable_equity and not diag.min_lot_unaffordable:
+        lines.append(
+            f"Per-ATR risk is inside the {diag.warning_threshold_pct:.0f}% threshold only "
+            "because the ATR is measured on short intraday bars. Against an ordinary "
+            f"day of gold movement the minimum position of {diag.min_position_oz:.2f} oz "
+            f"risks {diag.risk_per_daily_range_pct:.0f}% of this account."
         )
     if diag.min_lot_unaffordable:
         lines.append(

@@ -131,8 +131,7 @@ def headline_verdict(
     lines += verdicts or ["- No tradeable strategies were run."]
     lines.append("")
 
-    risky = [r for r in reports if r.result.risk is not None and
-             (r.result.risk.breaches_threshold or r.result.risk.min_lot_unaffordable)]
+    risky = [r for r in reports if r.result.risk is not None and r.result.risk.needs_warning]
     if risky:
         lines.append("```")
         lines += format_risk_warning(risky[0].result.risk)
@@ -173,7 +172,7 @@ def account_reality_section(reports: list[StrategyReport], cfg: Config) -> list[
         ],
     ))
     lines.append("")
-    if risk.min_lot_unaffordable:
+    if risk.needs_warning:
         lines.append(
             f"At {capital:,.0f} USD the minimum tradeable position risks "
             f"{risk.min_risk_per_atr_pct:.1f}% of the account per ATR of adverse movement. "

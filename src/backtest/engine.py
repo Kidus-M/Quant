@@ -282,10 +282,12 @@ def run_backtest(
     equity_series = pd.Series(equity_net, index=index, name="equity_net")
 
     risk = _risk_report(bars, trades, cfg, sizer, capital)
-    if risk is not None and (risk.breaches_threshold or risk.min_lot_unaffordable):
+    if risk is not None and risk.needs_warning:
         warnings.append(
-            f"position risk per ATR is {risk.risk_per_atr_pct:.1f}% of equity, above "
-            f"the {risk.warning_threshold_pct:.0f}% threshold"
+            f"position risk is {risk.risk_per_atr_pct:.1f}% of equity per ATR and "
+            f"{risk.risk_per_daily_range_pct:.0f}% per typical daily range; the "
+            f"configured risk rule needs about "
+            f"{risk.min_viable_equity_daily_range_usd:,.0f} USD of equity"
         )
 
     result = BacktestResult(
