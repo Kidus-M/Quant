@@ -13,6 +13,16 @@ what the best of ``n_trials`` random strategies would have produced. Below rough
 The harness counts every parameter combination it evaluates, across every
 walk-forward fold, and feeds that count in. Undercounting trials is the easiest
 way to make this test pass, so the trial count is reported alongside the number.
+
+**One deliberate deviation from the textbook statement.** The variance of the
+trial Sharpe ratios, which sets the selection-bias threshold, is estimated from
+the in-sample objectives across every fold and every parameter combination, while
+the Sharpe being deflated is the concatenated out-of-sample one. Pooling trials
+across folds mixes selection noise with genuine differences between training
+windows, so the variance, and therefore the threshold, comes out larger than pure
+selection noise alone would give. That makes the test harder to pass than the
+strict formulation. Erring in that direction is the point of the exercise: the
+alternative error mode is a backtester that certifies a lucky parameter search.
 """
 from __future__ import annotations
 

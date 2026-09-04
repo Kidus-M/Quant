@@ -311,3 +311,8 @@ fixed sizing only and refuses anything else rather than approximating it.
   triple-swap Wednesday convention.
 - Slippage is a constant per side, not a function of size or volatility. For 0.01
   lots that is reasonable; for size it would understate.
+- The deflated Sharpe estimates its trial-Sharpe variance from in-sample
+  objectives pooled across folds, while deflating the out-of-sample Sharpe. That
+  pools selection noise with real differences between training windows, so the
+  bar is set higher than the strict formulation would. Deliberate: the opposite
+  error certifies a lucky parameter search. See `src/metrics/deflated.py`.
