@@ -122,11 +122,12 @@ def cmd_risk(args) -> int:
 
 
 def cmd_backtest(args) -> int:
+    names = _selected(args)          # validate names before fetching anything
     cfg = _load(args)
     dataset = load_dataset(cfg, refresh=args.refresh)
     reports: list[StrategyReport] = []
 
-    for name in _selected(args):
+    for name in names:
         strategy = RESEARCH_STRATEGIES[name]()
         log.info("running %s", strategy.describe())
         try:
@@ -152,11 +153,12 @@ def cmd_backtest(args) -> int:
 
 
 def cmd_walkforward(args) -> int:
+    names = _selected(args)          # validate names before fetching anything
     cfg = _load(args)
     dataset = load_dataset(cfg, refresh=args.refresh)
     reports: list[StrategyReport] = []
 
-    for name in _selected(args):
+    for name in names:
         strategy_class = RESEARCH_STRATEGIES[name]
         if not getattr(strategy_class, "param_grid", None):
             log.info("%s has no parameter grid; running it once out of sample instead", name)

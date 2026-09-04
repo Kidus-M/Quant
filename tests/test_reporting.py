@@ -48,12 +48,14 @@ def test_report_states_plainly_when_costs_exceed_gross_profit(cfg):
             values[::2] = 1
             return pd.Series(values, index=bars.index, dtype="int8")
 
+    # A gentle uptrend: the strategy is right about direction and makes a gross
+    # profit, then hands all of it and more to the broker in round trips.
     rng = np.random.default_rng(5)
-    closes = 1800 + np.cumsum(rng.normal(0.02, 1.0, 600))
+    closes = 1800 + np.cumsum(rng.normal(0.15, 1.0, 600))
     dataset = make_dataset(make_bars(closes))
     result = run_backtest(dataset, Churn(), cfg, initial_capital=100_000.0)
-    if not result.costs_exceed_gross_profit:
-        pytest.skip("this random sample did not produce a gross profit to swamp")
+    assert result.gross_pnl > 0
+    assert result.costs_exceed_gross_profit
 
     markdown = build_markdown([StrategyReport.build(result)], dataset, cfg, {})
     assert "exceeded gross profit" in markdown
