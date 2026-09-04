@@ -143,15 +143,17 @@ def _evaluate(
     closed_oz = np.where(changed, np.abs(prev_position), 0.0)
     opened_oz = np.where(changed, np.abs(position), 0.0)
 
-    def transact(quantity: np.ndarray) -> np.ndarray:
-        return quantity * cost_per_oz + (quantity / contract) * commission
+    def transact(quantity, per_oz) -> np.ndarray:
+        return quantity * per_oz + (quantity / contract) * commission
 
-    close_cost = transact(closed_oz)
-    open_cost = transact(opened_oz)
+    close_cost = transact(closed_oz, cost_per_oz)
+    open_cost = transact(opened_oz, cost_per_oz)
     trade_cost = close_cost + open_cost
     if position[-1] != 0.0:
-        # The engine liquidates any position still open at the final close.
-        trade_cost[-1] += transact(np.abs(position[-1:]))[0]
+        # The engine liquidates any position still open at the final close. The
+        # per-ounce cost must be the LAST bar one; letting the full-length
+        # cost_per_oz array broadcast here silently charges the first bar spread.
+        trade_cost[-1] += transact(abs(float(position[-1])), float(cost_per_oz[-1]))
 
     swap_rate = np.where(
         prev_position > 0,

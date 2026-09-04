@@ -68,6 +68,43 @@ def profile_from_result(result: "BacktestResult") -> TradeProfile:
     )
 
 
+def random_signal_array(
+    n_bars: int,
+    *,
+    entry_probability: float,
+    mean_hold_bars: float,
+    long_fraction: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """One random position path in {-1, 0, +1}.
+
+    Costs O(number of trades) rather than O(number of bars): flat gaps and holding
+    periods are both drawn as geometric waiting times and written as slices. That
+    matters because the benchmark runs this a thousand times over tens of
+    thousands of bars.
+
+    This is the single definition of a random path. The engine route and the fast
+    route both call it, so the null hypothesis cannot quietly differ between the
+    two places it is used.
+    """
+    signal = np.zeros(n_bars, dtype="int8")
+    if entry_probability <= 0 or n_bars == 0:
+        return signal
+    mean_hold = max(1.0, float(mean_hold_bars))
+    p_entry = min(1.0, float(entry_probability))
+
+    position = 0
+    while True:
+        position += int(rng.geometric(p_entry))   # bars spent flat before entering
+        if position >= n_bars:
+            break
+        hold = int(rng.geometric(1.0 / mean_hold))
+        end = min(n_bars, position + hold)
+        signal[position:end] = 1 if rng.random() < long_fraction else -1
+        position = end
+    return signal
+
+
 class RandomEntryStrategy(Strategy):
     """Random entries with a configurable trade profile.
 
@@ -89,27 +126,13 @@ class RandomEntryStrategy(Strategy):
         }
 
     def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
-        n = len(bars)
-        rng = np.random.default_rng(int(self.params["seed"]))
-        p_entry = float(self.params["entry_probability"])
-        mean_hold = max(1.0, float(self.params["mean_hold_bars"]))
-        long_fraction = float(self.params["long_fraction"])
-
-        entries = rng.random(n) < p_entry
-        directions = np.where(rng.random(n) < long_fraction, 1, -1).astype("int8")
-        # Geometric holding times with the requested mean. p = 1/mean.
-        holds = rng.geometric(1.0 / mean_hold, size=n)
-
-        signal = np.zeros(n, dtype="int8")
-        i = 0
-        while i < n:
-            if entries[i]:
-                hold = int(holds[i])
-                end = min(n, i + hold)
-                signal[i:end] = directions[i]
-                i = end
-            else:
-                i += 1
+        signal = random_signal_array(
+            len(bars),
+            entry_probability=float(self.params["entry_probability"]),
+            mean_hold_bars=float(self.params["mean_hold_bars"]),
+            long_fraction=float(self.params["long_fraction"]),
+            rng=np.random.default_rng(int(self.params["seed"])),
+        )
         return pd.Series(signal, index=bars.index, dtype="int8")
 
     @classmethod
