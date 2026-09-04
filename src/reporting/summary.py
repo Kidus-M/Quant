@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.backtest.benchmark import RandomBenchmarkResult
+from src.backtest.benchmark import RandomBenchmarkResult, ordinal
 from src.backtest.engine import BacktestResult
 from src.backtest.sizing import format_risk_warning
 from src.backtest.walkforward import WalkForwardResult
@@ -107,9 +107,9 @@ def headline_verdict(
             reasons.append(f"net P&L was {metrics.net_pnl_usd:,.2f} USD")
         if report.benchmark is not None and report.benchmark.n_runs and not report.benchmark.passes:
             reasons.append(
-                f"it sits at the {report.benchmark.strategy_percentile:.0f}th percentile of "
-                f"{report.benchmark.n_runs} random-entry runs with the same trade profile, "
-                f"below the {report.benchmark.percentile_threshold:.0f}th percentile bar"
+                f"it sits at the {ordinal(report.benchmark.strategy_percentile)} percentile "
+                f"of {report.benchmark.n_runs} random-entry runs with the same trade profile, "
+                f"below the {ordinal(report.benchmark.percentile_threshold)} percentile bar"
             )
         wf = report.walk_forward
         if wf is not None and wf.deflated is not None and not wf.deflated.is_significant:
@@ -265,7 +265,7 @@ def comparison_section(reports: list[StrategyReport]) -> list[str]:
         )
         bench = report.benchmark
         if bench is not None and bench.n_runs:
-            pct = f"{bench.strategy_percentile:.1f}th"
+            pct = ordinal(bench.strategy_percentile)
             threshold = _fmt(bench.threshold_value)
             passed = "yes" if bench.passes else "**no**"
             median = _fmt(float(np.median(bench.net_pnl)))

@@ -195,3 +195,11 @@ def test_cli_override_syntax_is_validated():
 
     with pytest.raises(SystemExit, match="key=value"):
         cli.main(["backtest", "--set", "nonsense"])
+
+
+def test_percentiles_get_the_right_english_suffix():
+    from src.backtest.benchmark import ordinal
+
+    assert [ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 62, 91, 95)] == [
+        "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "62nd", "91st", "95th"
+    ]

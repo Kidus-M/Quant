@@ -28,6 +28,16 @@ from src.strategies.random_entry import TradeProfile, profile_from_result, rando
 log = logging.getLogger(__name__)
 
 
+def ordinal(value: float) -> str:
+    """Render a percentile with the right English suffix: 91st, not 91th."""
+    n = int(round(value))
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 @dataclass
 class RandomBenchmarkResult:
     n_runs: int
@@ -72,9 +82,9 @@ class RandomBenchmarkResult:
             f"Random benchmark ({self.n_runs} runs matched to {self.profile.describe()}):",
             f"  strategy net P&L      {self.strategy_net_pnl:>10,.2f} USD",
             f"  random median         {np.median(self.net_pnl):>10,.2f} USD",
-            f"  random {self.percentile_threshold:.0f}th percentile "
+            f"  random {ordinal(self.percentile_threshold)} percentile "
             f"{self.threshold_value:>10,.2f} USD",
-            f"  strategy sits at the {self.strategy_percentile:.1f}th percentile "
+            f"  strategy sits at the {ordinal(self.strategy_percentile)} percentile "
             f"of random -- it {verdict}.",
         ]
         if self.ruin_fraction > 0:

@@ -22,7 +22,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.backtest.benchmark import run_random_benchmark  # noqa: E402
+from src.backtest.benchmark import ordinal, run_random_benchmark  # noqa: E402
 from src.backtest.costs import CostModel  # noqa: E402
 from src.backtest.engine import run_backtest  # noqa: E402
 from src.backtest.sizing import PositionSizer, format_risk_warning  # noqa: E402
@@ -198,7 +198,7 @@ def _print_console_summary(reports: list[StrategyReport]) -> None:
     for report in reports:
         bench = report.benchmark
         pct = (
-            f"{bench.strategy_percentile:.0f}th"
+            ordinal(bench.strategy_percentile)
             if bench is not None and bench.n_runs else "-"
         )
         print(
