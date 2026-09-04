@@ -158,6 +158,7 @@ class RiskDiagnostics:
     min_risk_per_atr_pct: float
     risk_per_daily_range_pct: float
     min_viable_equity_usd: float
+    min_viable_equity_daily_range_usd: float
     risk_fraction_per_trade: float
     stop_atr_multiple: float
     warning_threshold_pct: float
@@ -200,11 +201,16 @@ def risk_diagnostics(
         return 100.0 * oz * move / equity
 
     stop_distance = sizer.stop_atr_multiple * atr_usd_per_oz
-    min_viable = (
-        (stop_distance * min_oz) / sizer.risk_fraction_per_trade
-        if np.isfinite(stop_distance) and sizer.risk_fraction_per_trade > 0
-        else float("nan")
-    )
+    def viable_equity(adverse_move: float) -> float:
+        if not np.isfinite(adverse_move) or sizer.risk_fraction_per_trade <= 0:
+            return float("nan")
+        return (adverse_move * min_oz) / sizer.risk_fraction_per_trade
+
+    # Two readings of the same question. The stop-based number is what the
+    # configured rule needs; the daily-range number is what surviving an ordinary
+    # day needs, and it is the larger and more honest of the two.
+    min_viable = viable_equity(stop_distance)
+    min_viable_daily = viable_equity(daily_range)
 
     return RiskDiagnostics(
         equity=equity,
@@ -216,6 +222,7 @@ def risk_diagnostics(
         min_risk_per_atr_pct=pct(min_oz, atr_usd_per_oz),
         risk_per_daily_range_pct=pct(position_oz, daily_range),
         min_viable_equity_usd=min_viable,
+        min_viable_equity_daily_range_usd=min_viable_daily,
         risk_fraction_per_trade=sizer.risk_fraction_per_trade,
         stop_atr_multiple=sizer.stop_atr_multiple,
         warning_threshold_pct=warning_threshold_pct,
@@ -263,8 +270,17 @@ def format_risk_warning(diag: RiskDiagnostics) -> list[str]:
         lines.append(
             f"Minimum viable account size for a {diag.risk_fraction_per_trade:.1%} "
             f"risk-per-trade rule with a {diag.stop_atr_multiple:g}x ATR stop: "
-            f"{diag.min_viable_equity_usd:,.0f} USD. Below that, the 0.01 lot "
-            "minimum forces more risk per trade than the rule permits."
+            f"{diag.min_viable_equity_usd:,.0f} USD. Below that, the "
+            f"{diag.min_position_oz / 100:.2f} lot minimum forces more risk per "
+            "trade than the rule permits."
+        )
+    if np.isfinite(diag.min_viable_equity_daily_range_usd):
+        lines.append(
+            f"Measured against a typical DAILY range rather than an intraday stop, "
+            f"the same rule needs {diag.min_viable_equity_daily_range_usd:,.0f} USD. "
+            "That is the figure to plan around: it is the equity at which one "
+            "ordinary day of gold movement costs "
+            f"{diag.risk_fraction_per_trade:.1%} of the account rather than half of it."
         )
     lines.append("=" * 78)
     return lines

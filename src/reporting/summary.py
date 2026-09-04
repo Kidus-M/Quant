@@ -166,18 +166,23 @@ def account_reality_section(reports: list[StrategyReport], cfg: Config) -> list[
              f"{_fmt(risk.risk_per_daily_range_pct, ',.1f')}% of equity"],
             [f"Minimum viable equity for a {risk.risk_fraction_per_trade:.1%} risk rule "
              f"({risk.stop_atr_multiple:g}x ATR stop)",
-             f"**{_fmt(risk.min_viable_equity_usd, ',.0f')} USD**"],
+             f"{_fmt(risk.min_viable_equity_usd, ',.0f')} USD"],
+            [f"Minimum viable equity for a {risk.risk_fraction_per_trade:.1%} risk rule "
+             "vs a typical DAILY range",
+             f"**{_fmt(risk.min_viable_equity_daily_range_usd, ',.0f')} USD**"],
         ],
     ))
     lines.append("")
     if risk.min_lot_unaffordable:
         lines.append(
             f"At {capital:,.0f} USD the minimum tradeable position risks "
-            f"{risk.min_risk_per_atr_pct:.0f}% of the account per ATR of adverse movement. "
+            f"{risk.min_risk_per_atr_pct:.1f}% of the account per ATR of adverse movement. "
             "There is no position sizing rule that fixes this; the instrument contract "
             "size is simply too large relative to the account. The equity level at which "
             f"the configured risk rule becomes followable is about "
-            f"{_fmt(risk.min_viable_equity_usd, ',.0f')} USD."
+            f"{_fmt(risk.min_viable_equity_usd, ',.0f')} USD against the configured "
+            f"stop, and about {_fmt(risk.min_viable_equity_daily_range_usd, ',.0f')} "
+            "USD against a typical daily range."
         )
         lines.append("")
     return lines
