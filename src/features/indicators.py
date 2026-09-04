@@ -39,14 +39,23 @@ def wilder_ema(series: pd.Series, period: int) -> pd.Series:
     return _as_series(series).ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Wilder RSI. Returns values in [0, 100], NaN until the window fills."""
+def rsi_components(series: pd.Series, period: int = 14) -> tuple[pd.Series, pd.Series]:
+    """The smoothed average gain and average loss behind the RSI.
+
+    Exposed because the alerting inverts the RSI to answer "what price would put
+    RSI(2) below 10 on the next bar", and that inversion needs the two running
+    averages rather than the ratio they collapse into.
+    """
     s = _as_series(series).astype("float64")
     delta = s.diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
-    avg_gain = wilder_ema(gain, period)
-    avg_loss = wilder_ema(loss, period)
+    return wilder_ema(gain, period), wilder_ema(loss, period)
+
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder RSI. Returns values in [0, 100], NaN until the window fills."""
+    avg_gain, avg_loss = rsi_components(series, period)
     # A flat window means no losses: RSI is 100 by definition, not a divide-by-zero.
     rs = avg_gain / avg_loss.replace(0.0, np.nan)
     out = 100.0 - (100.0 / (1.0 + rs))

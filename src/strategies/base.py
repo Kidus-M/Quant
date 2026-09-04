@@ -13,12 +13,42 @@ engine fills it at the open of bar ``t+1``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
 VALID_SIGNALS = frozenset({-1, 0, 1})
+
+
+@dataclass(frozen=True)
+class EntryLevel:
+    """A price at which a strategy would open a position, as of the latest bar.
+
+    Used only by the phase 2 alerting, which needs a level to watch rather than a
+    signal that has already fired. Backtesting never touches this: it would be a
+    second, unvalidated definition of when a strategy trades.
+
+    ``blocked_by`` lists conditions that currently make the setup unreachable (a
+    trend filter pointing the wrong way, a macro regime gate). A blocked level is
+    still reported, so a message can say why nothing will fire rather than going
+    quiet.
+    """
+
+    direction: int          # +1 long, -1 short
+    price: float
+    kind: str               # "breakout", "mean_reversion", ...
+    blocked_by: tuple[str, ...] = ()
+    note: str = ""
+
+    @property
+    def is_reachable(self) -> bool:
+        return not self.blocked_by and np.isfinite(self.price)
+
+    @property
+    def side(self) -> str:
+        return "LONG" if self.direction > 0 else "SHORT"
 
 
 class SignalContractError(ValueError):
@@ -63,6 +93,18 @@ class Strategy(ABC):
     @abstractmethod
     def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
         """Target position in {-1, 0, +1} for every bar."""
+
+    # ------------------------------------------------------------------ #
+    # Phase 2 support. Optional: a strategy with no meaningful price level
+    # simply reports none, and the alert runner skips it.
+    # ------------------------------------------------------------------ #
+    def entry_levels(self, bars: pd.DataFrame, features: pd.DataFrame) -> list[EntryLevel]:
+        """Prices at which this strategy would enter, as of the final bar."""
+        return []
+
+    def current_stop(self, bars: pd.DataFrame, features: pd.DataFrame) -> float | None:
+        """The stop level protecting an open position, if the strategy has one."""
+        return None
 
     # ------------------------------------------------------------------ #
     def describe(self) -> str:

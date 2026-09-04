@@ -19,7 +19,7 @@ python run.py costs               # what the cost model implies, before any stra
 python run.py risk                # what the configured account size can actually do
 python run.py backtest            # every strategy, full sample, writes reports/summary.md
 python run.py walkforward         # anchored walk-forward, the number that counts
-pytest                            # 210 tests, including the lookahead suite
+pytest                            # 215 tests, including the lookahead suite
 ```
 
 Out of the box it runs on **synthetic bars** so everything works with no network
@@ -129,22 +129,30 @@ This is the single most important output, so the engine computes it and prints i
 where it cannot be missed:
 
 ```
+$ python run.py risk
 ==============================================================================
 POSITION SIZING WARNING
 ==============================================================================
-Account equity 50.00 USD. One ATR of adverse movement (2.59 USD/oz) against the
-configured position of 1.00 oz costs 5.2% of the account.
-A typical full daily range (25.66 USD/oz) is 51.3% of the account.
-The broker minimum position of 1.00 oz (0.01 lots) alone risks 5.2% of equity per
+Account equity 50.00 USD. One ATR of adverse movement (2.56 USD/oz) against the
+configured position of 1.00 oz costs 5.1% of the account.
+A typical full daily range (28.61 USD/oz) is 57.2% of the account.
+The broker minimum position of 1.00 oz (0.01 lots) alone risks 5.1% of equity per
 ATR. This account cannot open the smallest tradeable position without taking risk
 far above any sane per-trade limit. Ordinary daily noise, not a bad strategy, is
 enough to end it.
 Minimum viable account size for a 1.0% risk-per-trade rule with a 2x ATR stop:
-519 USD.
+512 USD.
 Measured against a typical DAILY range rather than an intraday stop, the same rule
-needs 2,566 USD.
+needs 2,861 USD. That is the figure to plan around.
 ==============================================================================
 ```
+
+The warning fires on three independent conditions, because any one of them alone
+can be gamed by the choice of bar size: risk per ATR above the configured
+threshold, the broker minimum lot being unaffordable at that threshold, or equity
+below the level a 1%-risk rule needs against an ordinary daily range. A 15-minute
+ATR is a fraction of a daily range, so an account can slip under the per-ATR bar
+and still be destroyed by a normal Tuesday.
 
 Related engine behaviour: when net equity reaches zero the account is **stopped
 out** — the position is closed at the next open and nothing reopens, which is what
@@ -267,7 +275,7 @@ src/
   backtest/      cost model, sizing, portfolio, event loop, fast path, walk-forward
   metrics/       performance stats, probabilistic and deflated Sharpe
   reporting/     markdown summary, equity/drawdown/sensitivity plots
-tests/           210 tests
+tests/           215 tests
 notebooks/       exploration only, nothing importable
 data/            parquet cache and quarantine (gitignored)
 reports/         generated output (gitignored)
@@ -303,6 +311,10 @@ fixed sizing only and refuses anything else rather than approximating it.
 - The Dukascopy fetcher is unverified against the live endpoint (see above).
 - Position size is fixed for the life of a trade. Pyramiding would need a richer
   strategy contract than `{-1, 0, +1}` and is left out rather than half-built.
+- Runs are reproducible: the synthetic generator is seeded from a stable CRC of
+  the symbol, and two full walk-forward runs give byte-identical results. (It was
+  originally seeded from Python `hash()`, which is randomised per process, so the
+  data silently changed on every run.)
 - The synthetic generator is a driftless random walk with fat tails, volatility
   seasonality, jumps and session gaps. It is useful precisely because it has no
   edge to find — a strategy that profits on it is revealing a bug — but it is not

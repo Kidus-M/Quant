@@ -1,0 +1,54 @@
+# Phase 2: paper-signal alerting. Layered on top of config/backtest.yaml.
+#
+# This notifies a human. It does not place orders, and there is no code path
+# in this repository that can.
+
+alerts:
+  enabled: true
+
+  # Which strategies to watch. Names come from the research registry.
+  strategies: [trend_donchian, rsi2]
+
+  # Shown in messages. The instrument itself comes from instrument.symbol.
+  symbol_label: XAU/USD
+
+  # How often the loop runner checks. Cron users can ignore this and use --once.
+  poll_interval_seconds: 300
+
+  # Alert when price comes within this many ATRs of an entry level.
+  approach_atr_multiple: 0.5
+  # Hysteresis: a setup only re-arms once price is this far away again. Without
+  # a gap between these two numbers, price hovering at the threshold produces an
+  # alert on every single bar.
+  reset_atr_multiple: 1.5
+  # Re-alert on a setup already alerted if the level itself has moved this far.
+  level_move_atr_multiple: 1.0
+  # Also send a message at the moment a signal actually fires, not just on approach.
+  notify_on_trigger: true
+
+  # Suggested stop distance in the message, in ATRs. Suggestion only.
+  stop_atr_multiple: 2.0
+
+  # If the newest bar is older than this, something upstream is broken. Say so
+  # once, rather than letting silence look like "no setups".
+  max_bar_age_minutes: 90
+  # How far back to pull on each check.
+  lookback_days: 30
+
+  # Silence must be distinguishable from a crashed process.
+  heartbeat_hours: 6
+  send_startup_heartbeat: true
+
+  rate_limit:
+    min_seconds_between_messages: 3
+    max_messages_per_hour: 20
+
+  state_path: data/alerts_state.json
+
+  # Printed in every message. Phase 1 did not certify any of these strategies.
+  evidence_note: >-
+    No strategy here has cleared the random-entry benchmark net of costs out of
+    sample. These are research prompts, not trade recommendations.
+
+  # true = format and log messages without contacting Telegram.
+  dry_run: false

@@ -25,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.strategies.base import Strategy
+from src.strategies.base import EntryLevel, Strategy
 from src.strategies.trend import DonchianTrendStrategy
 
 
@@ -89,3 +89,41 @@ class MacroFilteredTrendStrategy(DonchianTrendStrategy):
             np.where((base < 0) & allow_short, -1, 0),
         ).astype("int8")
         return pd.Series(filtered, index=bars.index, dtype="int8")
+
+    def entry_levels(self, bars: pd.DataFrame, features: pd.DataFrame) -> list[EntryLevel]:
+        """Donchian levels, gated by the current real-yield regime.
+
+        A blocked level is still reported rather than hidden. "Price is at the
+        breakout but the macro filter is holding it back" is the single most
+        useful thing this strategy can say, and dropping the level entirely would
+        make it look like there was simply no setup.
+        """
+        levels = super().entry_levels(bars, features)
+        if not levels or "macro_change" not in features.columns:
+            return levels
+
+        change = float(features["macro_change"].iloc[-1])
+        series = str(self.params["macro_series"])
+        prints = int(self.params["macro_lookback_prints"])
+
+        if not np.isfinite(change):
+            reason = f"{series} regime unknown (fewer than {prints} prints available)"
+            return [
+                EntryLevel(l.direction, l.price, l.kind, l.blocked_by + (reason,), l.note)
+                for l in levels
+            ]
+
+        gated = []
+        for level in levels:
+            blocked = list(level.blocked_by)
+            if level.direction > 0 and change >= 0:
+                blocked.append(
+                    f"{series} is rising over {prints} prints ({change:+.3f}), so longs are filtered out"
+                )
+            if level.direction < 0 and change <= 0:
+                blocked.append(
+                    f"{series} is falling over {prints} prints ({change:+.3f}), so shorts are filtered out"
+                )
+            gated.append(EntryLevel(level.direction, level.price, level.kind,
+                                    tuple(blocked), level.note))
+        return gated

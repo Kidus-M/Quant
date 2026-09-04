@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.features.indicators import atr, donchian
-from src.strategies.base import Strategy
+from src.strategies.base import EntryLevel, Strategy
 
 
 class DonchianTrendStrategy(Strategy):
@@ -60,7 +60,14 @@ class DonchianTrendStrategy(Strategy):
             index=bars.index,
         )
 
-    def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
+    def _walk(self, bars: pd.DataFrame, features: pd.DataFrame):
+        """Run the entry/stop state machine once, returning signals and stops.
+
+        Both ``generate_signals`` and ``current_stop`` call this, so the level the
+        alert quotes as "your stop" is produced by the same code that decides the
+        backtested exit. A separately-written stop for the alerting would be a
+        second definition of the strategy, free to drift from the tested one.
+        """
         close = bars["close"].to_numpy(dtype="float64")
         upper = features["donchian_upper"].to_numpy(dtype="float64")
         lower = features["donchian_lower"].to_numpy(dtype="float64")
@@ -73,6 +80,7 @@ class DonchianTrendStrategy(Strategy):
         short_entry = (close < lower) if allow_shorts else np.zeros(len(close), dtype=bool)
 
         signal = np.zeros(len(close), dtype="int8")
+        stops = np.full(len(close), np.nan, dtype="float64")
         state = 0
         best = np.nan     # best close achieved since entry, in the trade direction
         stop = np.nan
@@ -89,7 +97,7 @@ class DonchianTrendStrategy(Strategy):
                     candidate = best - stop_mult * a
                     stop = candidate if not np.isfinite(stop) else max(stop, candidate)
                 if np.isfinite(stop) and price < stop:
-                    state = 0
+                    state, stop, best = 0, np.nan, np.nan
             elif state == -1:
                 if price < best:
                     best = price
@@ -97,7 +105,7 @@ class DonchianTrendStrategy(Strategy):
                     candidate = best + stop_mult * a
                     stop = candidate if not np.isfinite(stop) else min(stop, candidate)
                 if np.isfinite(stop) and price > stop:
-                    state = 0
+                    state, stop, best = 0, np.nan, np.nan
 
             if state == 0:
                 if long_entry[i] and np.isfinite(a):
@@ -110,4 +118,35 @@ class DonchianTrendStrategy(Strategy):
                 state, best, stop = 1, price, price - stop_mult * a
 
             signal[i] = state
+            stops[i] = stop if state != 0 else np.nan
+        return signal, stops
+
+    def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
+        signal, _ = self._walk(bars, features)
         return pd.Series(signal, index=bars.index, dtype="int8")
+
+    def current_stop(self, bars: pd.DataFrame, features: pd.DataFrame) -> float | None:
+        _, stops = self._walk(bars, features)
+        value = float(stops[-1]) if len(stops) else float("nan")
+        return value if np.isfinite(value) else None
+
+    def entry_levels(self, bars: pd.DataFrame, features: pd.DataFrame) -> list[EntryLevel]:
+        """The Donchian channel edges, which are exactly the breakout triggers."""
+        if not len(bars):
+            return []
+        upper = float(features["donchian_upper"].iloc[-1])
+        lower = float(features["donchian_lower"].iloc[-1])
+        window = int(self.params["entry_window"])
+
+        levels = [EntryLevel(
+            direction=1, price=upper, kind="breakout",
+            blocked_by=() if np.isfinite(upper) else ("channel still warming up",),
+            note=f"close above the {window}-bar high",
+        )]
+        if bool(self.params["allow_shorts"]):
+            levels.append(EntryLevel(
+                direction=-1, price=lower, kind="breakout",
+                blocked_by=() if np.isfinite(lower) else ("channel still warming up",),
+                note=f"close below the {window}-bar low",
+            ))
+        return levels
