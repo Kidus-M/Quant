@@ -1,6 +1,10 @@
-# Data + outputs are never committed
-data/
-reports/
+# Data + outputs are never committed.
+# Leading slash anchors these to the repository root. Without it, "data/" matches
+# a directory of that name at ANY depth -- which silently excluded the entire
+# src/data/ package from every commit, and shipped a deploy that could not import
+# its own data layer.
+/data/
+/reports/
 notebooks/*.ipynb_checkpoints/
 
 # Credentials

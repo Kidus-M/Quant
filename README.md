@@ -44,24 +44,43 @@ python run.py backtest --set costs.slippage_usd_per_oz_per_side=0.25
 
 | Source | Verdict |
 |---|---|
-| **Dukascopy** | **Chosen for backtesting.** Free, no account, deepest intraday history, and it serves raw **ticks** rather than only pre-built candles. Ticks matter twice over: the 1-minute bars in the cache are then genuinely source data rather than someone else aggregation, and the measured bid/ask spread turns the most important assumption in the cost model into something checkable against the tape. |
-| OANDA v20 practice | Clean candle endpoint and a free key, but shallower history and an account requirement. The better choice for the later live-signal phase, which is not built. |
-| Twelve Data | Free tier has 1-minute bars but is rate limited and history is short. Not enough for a multi-year walk-forward. |
+| **OANDA v20 practice** | **Chosen.** Free practice account, years of M1 history, and `price=BA` returns **separate bid and ask candles**. That last point is the reason it wins: it makes the assumed 0.30 USD/oz round-trip spread a measurement rather than an assertion. Costs an account signup. |
+| Dukascopy | **No longer usable.** Was the original choice for its raw tick feed. As of September 2026 the free datafeed answers `429 Too Many Requests` on a first request for every symbol and date tried, and `503` behind a browser User-Agent. The adapter and its decoder remain in the tree and tested, because the code is correct and the source may return. |
+| Twelve Data | Free tier has 1-minute bars but is rate limited, history is short, and it returns OHLC only — so the cost model's spread would stay an assumption forever. Not enough for a multi-year walk-forward. |
 
 Implemented adapters: `synthetic` (default, offline), `csv` / `parquet` (a vendor
-dump already on disk), `dukascopy` (live fetch), plus `fred` for the macro series.
+dump already on disk), `oanda` (live fetch), `dukascopy` (live fetch, source
+currently unavailable), plus `fred` for the macro series.
 
-> **Honest limitation.** The machine this was built on can reach package
-> registries but not `datafeed.dukascopy.com` or `fred.stlouisfed.org` directly,
-> so the Dukascopy fetcher has **never been run against the live endpoint**. Its
-> decoding arithmetic is unit-tested against payloads packed in the documented
-> layout (`tests/test_strategies.py::test_dukascopy_tick_decoder_round_trips`),
-> and `fetch` sanity-checks decoded prices against a plausible range and refuses
-> to cache anything outside it rather than writing nonsense. But the first real
-> `python run.py fetch --set data.adapter=dukascopy` may still need the URL
-> pattern or record layout adjusted. The FRED client **has** been run for real:
-> `DFII10`, `DTWEXBGS`, `DGS10` and `T10YIE` are cached and used by the
-> macro-filtered strategy.
+### The broker-API boundary
+
+OANDA is a broker, and this project's first stated non-goal is *no live order
+placement, no broker execution API, not in phase 1, not as a stub*. Reading
+candles does not violate that, but it puts the constraint within reach for the
+first time, so it is enforced structurally rather than by intention:
+
+* `src/data/oanda.py` calls exactly one endpoint,
+  `/v3/instruments/{instrument}/candles`, checked at runtime in `_get` — a
+  non-candles path raises before any request is made.
+* The adapter never receives, reads or stores an OANDA **account id**. Every
+  OANDA endpoint that can create, modify or close a position is addressed as
+  `/v3/accounts/{accountID}/...`, so without one no such URL is constructible.
+* `tests/test_oanda.py` AST-scans all of `src/` and fails the build if an
+  execution endpoint appears in executable code, or if anything reads
+  `OANDA_ACCOUNT_ID`.
+
+> **Honest limitation.** The OANDA adapter has been run against the live host and
+> its error handling verified there (a bad token returns a correctly-hinted 401,
+> so the host is reachable and the request shape is accepted). The
+> **authenticated happy path has not been exercised** — no practice token was
+> available at the time of writing. Parsing, mid derivation, spread extraction,
+> incomplete-candle rejection and pagination are unit-tested against payloads in
+> the documented shape, and `fetch` refuses to cache prices outside a plausible
+> range. The first real `python run.py fetch --set data.adapter=oanda` is still
+> the moment to check the output rather than trust it.
+>
+> The FRED client **has** been run for real: `DFII10`, `DTWEXBGS`, `DGS10` and
+> `T10YIE` are cached and used by the macro-filtered strategy.
 
 ### Data rules the layer enforces
 
@@ -78,6 +97,21 @@ dump already on disk), `dukascopy` (live fetch), plus `fred` for the macro serie
   never refetched. The cache key includes any adapter setting that changes the
   data — omitting that was a real bug during development, where every synthetic
   seed silently replayed the first one.
+- **Cache freshness is explicit, because research and live want opposite things.**
+  A backtest should tolerate a stale edge: refetching a whole month to gain its
+  final partial day is waste. A live poller must not, and the default nearly
+  broke the alert runner — asking for bars up to *now* every five minutes, it was
+  told the current month was covered and served the same frame for up to
+  twenty-four hours, reporting a stale feed once and then evaluating nothing.
+  `missing_months(..., freshness=)` makes the tolerance a decision at the call
+  site; `AlertRunner.load_bars` passes one base bar. A partially cached month is
+  then topped up from its cached edge rather than refetched whole, so a poller
+  cannot exhaust a rate-limited feed. Regression:
+  `tests/test_live_freshness.py`.
+- Adapters may carry a measured **`spread`** column alongside OHLCV, quoted at the
+  bar open to match the fill rule. It survives the cache and resamples with
+  `first`. This is the payoff from OANDA's bid/ask candles: the cost model's
+  central assumption becomes checkable.
 - Quality checks run on every load. **Structural failures** (duplicate timestamps,
   non-positive prices, high below low, bars stamped when the market is shut) are
   dropped and written to `data/quarantine/` with the reason attached.
@@ -427,7 +461,12 @@ state file. Permanent rejections (401/403) are not retried.
 
 ## Known limitations
 
-- The Dukascopy fetcher is unverified against the live endpoint (see above).
+- The OANDA adapter's authenticated happy path is unverified (see above). The
+  Dukascopy source is no longer reachable at all.
+- **Every result in this repository so far was measured on synthetic data.** That
+  includes the finding that no strategy beat the random-entry benchmark. It is
+  not evidence that the strategies lack an edge; it is the absence of evidence
+  either way. The walk-forward has never been run on real gold.
 - Position size is fixed for the life of a trade. Pyramiding would need a richer
   strategy contract than `{-1, 0, +1}` and is left out rather than half-built.
 - Runs are reproducible: the synthetic generator is seeded from a stable CRC of

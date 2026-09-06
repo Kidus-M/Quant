@@ -190,6 +190,12 @@ class AlertRunner:
 
         The window is bounded by ``lookback_days``, which must comfortably exceed
         the longest indicator lookback or the strategy state will be wrong.
+
+        ``freshness`` is what makes this a *live* load rather than a research one.
+        The cache tolerates a day of staleness by default, which is correct for a
+        backtest and silently fatal here: without this the poller is served the
+        same frame for up to twenty-four hours, reports a stale feed once, and
+        then evaluates nothing. One base bar is the tightest useful bound.
         """
         now = self._now()
         start = (now - pd.Timedelta(days=self.settings.lookback_days)).strftime("%Y-%m-%d")
@@ -197,7 +203,8 @@ class AlertRunner:
             "data.start": start,
             "data.end": now.strftime("%Y-%m-%d %H:%M:%S"),
         })
-        return load_dataset(cfg, adapter=self.adapter)
+        freshness = pd.Timedelta(self.cfg.get("data.base_resolution", "1min"))
+        return load_dataset(cfg, adapter=self.adapter, freshness=freshness)
 
     # ------------------------------------------------------------------ #
     def check_once(self) -> CheckOutcome:

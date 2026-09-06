@@ -16,7 +16,7 @@ data:
   resolution: 15min          # resolution the backtest runs on (resampled from base)
   start: "2019-01-01"
   end: "2024-12-31"
-  adapter: synthetic         # synthetic | csv | parquet | dukascopy
+  adapter: synthetic         # synthetic | csv | parquet | oanda | dukascopy
   cache_dir: data/cache
   quarantine_dir: data/quarantine
 
@@ -31,7 +31,18 @@ data:
     source_timezone: UTC     # stated, never guessed
     timestamp_column: null
     timestamp_format: null
+  oanda:
+    # practice | live. A practice token will not authenticate against the live
+    # host, so this and the token in .env must agree.
+    environment: practice
+    # BA fetches separate bid and ask candles, which yields a measured `spread`
+    # column alongside the mid OHLC. Set to M only if you are content for the
+    # cost model's spread to remain an assumption.
+    price: BA
   dukascopy:
+    # NOTE (2026-09): the free Dukascopy datafeed now answers 429 for every
+    # symbol and date, and 503 behind a browser User-Agent. The adapter is kept
+    # because the decoder is correct and tested, but the source is unavailable.
     max_workers: 8
 
   quality:
