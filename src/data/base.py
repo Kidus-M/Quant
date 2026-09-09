@@ -33,6 +33,9 @@ class DataProvenance:
     symbol: str
     native_resolution: str
     is_synthetic: bool = False
+    # See ``BarAdapter.pads_outside_session``. Carried here because the quality
+    # layer sees provenance, not the adapter object.
+    pads_outside_session: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def describe(self) -> str:
@@ -57,6 +60,16 @@ class BarAdapter(ABC):
     native_resolution: str = "1min"
     is_synthetic: bool = False
 
+    # True for a source that emits bars when the market is shut -- typically a
+    # vendor that pads non-trading hours with forward-filled rows rather than
+    # leaving a gap. Those bars are dropped by the session filter, which is
+    # correct, but it means a large drop fraction is *expected* rather than a
+    # sign of a broken feed. The quality layer budgets the two separately; see
+    # ``run_quality_checks``. Leave False unless a source is known to pad, so
+    # that out-of-session bars keep counting as corruption everywhere else --
+    # that is what catches a timezone mistake.
+    pads_outside_session: bool = False
+
     @abstractmethod
     def fetch(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         ...
@@ -78,6 +91,7 @@ class BarAdapter(ABC):
             symbol=symbol,
             native_resolution=self.native_resolution,
             is_synthetic=self.is_synthetic,
+            pads_outside_session=self.pads_outside_session,
         )
 
 
