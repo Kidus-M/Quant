@@ -223,6 +223,78 @@ def test_load_aborts_when_too_much_data_is_dropped(cfg, calendar):
 
 
 # ---------------------------------------------------------------------- #
+# Sources that pad non-trading hours
+#
+# Twelve Data returns a full 60 rows an hour right through the weekend. Dropping
+# them is correct, but it is ~38% of the load, so the corruption budget and the
+# session budget have to be separate numbers or a correct load cannot complete.
+# ---------------------------------------------------------------------- #
+def test_a_padding_source_budgets_session_drops_separately(cfg, calendar):
+    bars = make_bars([1800.0] * 20, start="2023-06-10 10:00", freq="1h")  # all Saturday
+    strict = cfg.with_overrides({
+        "data.quality.max_flagged_fraction": 0.02,
+        "data.quality.max_outside_session_fraction": 0.95,
+    })
+
+    clean, report = run_quality_checks(
+        bars, strict, calendar=calendar, pads_outside_session=True
+    )
+    assert clean.empty
+    assert report.counts["outside_session"] == 20
+    assert any("pads non-trading hours" in note for note in report.notes)
+
+
+def test_a_padding_source_still_has_a_session_ceiling(cfg, calendar):
+    """Expected padding is not a licence for unlimited session drop.
+
+    A timezone mistake would push nearly everything out of session, and that must
+    still fail rather than quietly shrinking the dataset.
+    """
+    bars = make_bars([1800.0] * 20, start="2023-06-10 10:00", freq="1h")  # all Saturday
+    strict = cfg.with_overrides({
+        "data.quality.max_flagged_fraction": 0.02,
+        "data.quality.max_outside_session_fraction": 0.45,
+    })
+
+    with pytest.raises(ValueError, match="max_outside_session_fraction"):
+        run_quality_checks(bars, strict, calendar=calendar, pads_outside_session=True)
+
+
+def test_a_padding_source_is_still_held_to_the_corruption_budget(cfg, calendar):
+    """Only the session reason is re-budgeted; corrupt bars answer to the strict one."""
+    closes = [1800.0] * 100
+    for i in range(10):
+        closes[i] = -1.0
+    bars = make_bars(closes, start="2023-06-07 08:00", freq="1min")  # Wednesday, in session
+    strict = cfg.with_overrides({
+        "data.quality.max_flagged_fraction": 0.02,
+        "data.quality.max_outside_session_fraction": 0.95,
+    })
+
+    with pytest.raises(ValueError, match="max_flagged_fraction"):
+        run_quality_checks(bars, strict, calendar=calendar, pads_outside_session=True)
+
+
+def test_a_bar_both_out_of_session_and_corrupt_counts_as_corrupt(cfg, calendar):
+    """Corruption is counted from its own mask, not by subtracting session drops.
+
+    Subtracting would net these bars to zero and hide a genuinely broken feed
+    behind the padding allowance.
+    """
+    closes = [1800.0] * 100
+    for i in range(10):
+        closes[i] = -1.0
+    bars = make_bars(closes, start="2023-06-10 10:00", freq="1min")  # all Saturday
+    strict = cfg.with_overrides({
+        "data.quality.max_flagged_fraction": 0.02,
+        "data.quality.max_outside_session_fraction": 0.95,
+    })
+
+    with pytest.raises(ValueError, match="max_flagged_fraction"):
+        run_quality_checks(bars, strict, calendar=calendar, pads_outside_session=True)
+
+
+# ---------------------------------------------------------------------- #
 # Cache
 # ---------------------------------------------------------------------- #
 def test_cache_refuses_to_store_a_derived_resolution(tmp_path, bars_15m):
