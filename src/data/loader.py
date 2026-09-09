@@ -94,6 +94,15 @@ def build_adapter(cfg: Config) -> BarAdapter:
         from src.data.dukascopy import DukascopyAdapter
 
         return DukascopyAdapter(max_workers=int(cfg.get("data.dukascopy.max_workers", 8)))
+    if name == "twelvedata":
+        from src.data.twelvedata import TwelveDataAdapter, TwelveDataCredentials
+
+        return TwelveDataAdapter(
+            credentials=TwelveDataCredentials.from_env(),
+            native_resolution=cfg.get("data.base_resolution", "1min"),
+            chunk_bars=int(cfg.get("data.twelvedata.chunk_bars", 4000)),
+            requests_per_minute=int(cfg.get("data.twelvedata.requests_per_minute", 8)),
+        )
     if name == "oanda":
         from src.data.oanda import OandaAdapter, OandaCredentials
 
