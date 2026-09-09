@@ -69,6 +69,15 @@ data:
     quarantine_zero_volume: false
     quarantine_price_spikes: false
     max_flagged_fraction: 0.02   # abort the load if more than this fraction is dropped
+    # Separate budget for bars dropped as outside market hours, and only for a
+    # source that declares it pads non-trading hours (currently twelvedata, which
+    # fills Saturday and most of Sunday with forward-filled rows). For every other
+    # adapter an out-of-session bar still counts against max_flagged_fraction
+    # above, because there it usually means the timestamps are in the wrong
+    # timezone. Gold is shut roughly 47 of 168 hours a week, so a correct load
+    # from a padding source drops a little under 30%; the headroom here covers
+    # holidays. Raise it only after checking the bars really are stamped UTC.
+    max_outside_session_fraction: 0.45
 
 macro:
   enabled: true

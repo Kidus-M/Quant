@@ -115,8 +115,22 @@ def run_quality_checks(
     *,
     calendar: SessionCalendar | None = None,
     label: str = "bars",
+    pads_outside_session: bool = False,
 ) -> tuple[pd.DataFrame, QualityReport]:
-    """Validate, quarantine, and return the usable bars."""
+    """Validate, quarantine, and return the usable bars.
+
+    ``max_flagged_fraction`` exists to abort on a corrupt feed. For most sources
+    an out-of-session bar *is* corruption -- most often a timezone mistake, which
+    is the failure this project works hardest to catch -- so it counts towards
+    that budget and the strict threshold applies.
+
+    A source that pads non-trading hours is different: it emits forward-filled
+    weekend rows by design, so a ~38% session drop is the expected outcome of a
+    correct load, not evidence of a problem. When the adapter declares
+    ``pads_outside_session`` those drops are budgeted separately against
+    ``max_outside_session_fraction``. Both budgets stay enforced; a timezone
+    error would still blow past the session one.
+    """
     q = cfg.section("data").section("quality")
     report = QualityReport(n_input=len(bars))
 
@@ -155,11 +169,39 @@ def run_quality_checks(
 
     clean = bars.loc[~drop_mask]
 
-    max_frac = float(q.get("max_flagged_fraction", 1.0))
     report.n_output = len(clean)
-    if report.dropped_fraction > max_frac:
+
+    max_frac = float(q.get("max_flagged_fraction", 1.0))
+    session_dropped = int(flags["outside_session"].sum()) if pads_outside_session else 0
+    if pads_outside_session and session_dropped:
+        # Budgeted separately below. Everything else still answers to the strict
+        # corruption threshold.
+        session_fraction = session_dropped / len(bars)
+        max_session_frac = float(q.get("max_outside_session_fraction", 0.5))
+        if session_fraction > max_session_frac:
+            raise ValueError(
+                f"data quality: dropped {session_fraction:.2%} of {label} as outside "
+                f"session, above max_outside_session_fraction of {max_session_frac:.2%}. "
+                "This source pads non-trading hours, so some session drop is expected, "
+                "but not this much. Check that the bars are stamped UTC and that the "
+                "session calendar matches the instrument before raising the threshold."
+            )
+        report.notes.append(
+            f"{session_dropped} bars fell outside market hours and were dropped. This "
+            "source pads non-trading hours with filled rows, so that is expected here "
+            "and is not a sign of a broken feed."
+        )
+        # Counted from the mask rather than by subtraction: a bar can be flagged
+        # both outside-session and corrupt, and subtracting would hide it.
+        corruption_cols = [c for c in drop_cols if c != "outside_session"]
+        corruption_dropped = int(flags[corruption_cols].any(axis=1).sum())
+        corruption_fraction = corruption_dropped / len(bars)
+    else:
+        corruption_fraction = report.dropped_fraction
+
+    if corruption_fraction > max_frac:
         raise ValueError(
-            f"data quality: dropped {report.dropped_fraction:.2%} of {label}, above the "
+            f"data quality: dropped {corruption_fraction:.2%} of {label}, above the "
             f"configured max_flagged_fraction of {max_frac:.2%}. Fix the source rather "
             "than raising the threshold."
         )

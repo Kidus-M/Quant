@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 
@@ -167,6 +167,11 @@ class TwelveDataAdapter(BarAdapter):
     name = "twelvedata"
     native_resolution = "1min"
     is_synthetic = False
+    # Measured against the live API: it returns a full 60 rows an hour right
+    # through Saturday and most of Sunday, when gold does not trade. Those rows
+    # are forward-filled padding, not quotes. The session filter drops them,
+    # which is correct, and this tells the quality layer to expect it.
+    pads_outside_session = True
 
     def __init__(
         self,
@@ -197,18 +202,16 @@ class TwelveDataAdapter(BarAdapter):
         self._last_request_at: float | None = None
 
     def provenance(self, symbol: str):
-        base = super().provenance(symbol)
-        # Carried into every report. Without it, a quality summary showing every
-        # bar flagged zero_volume looks like a broken feed rather than a source
-        # that does not publish volume for metals.
-        return type(base)(
-            adapter=base.adapter,
-            symbol=base.symbol,
-            native_resolution=base.native_resolution,
-            is_synthetic=base.is_synthetic,
+        # Carried into every report. Without these, a quality summary showing
+        # every bar flagged zero_volume and 38% dropped looks like a broken feed
+        # rather than a source that does not publish volume for metals and pads
+        # the weekend.
+        return replace(
+            super().provenance(symbol),
             notes=(
                 "volume is not published for this instrument and is reported as 0.0",
                 "no bid/ask available: the cost model's spread remains an assumption",
+                "non-trading hours are padded by the source and dropped on load",
             ),
         )
 

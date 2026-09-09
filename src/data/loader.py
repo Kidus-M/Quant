@@ -198,7 +198,11 @@ def load_dataset(
             provenance=provenance, calendar=calendar, quality=QualityReport(),
         )
 
-    clean, report = run_quality_checks(base_bars, cfg, calendar=calendar, label=f"{provenance.symbol}_{base_resolution}")
+    clean, report = run_quality_checks(
+        base_bars, cfg, calendar=calendar,
+        label=f"{provenance.symbol}_{base_resolution}",
+        pads_outside_session=provenance.pads_outside_session,
+    )
 
     if resolution == base_resolution:
         bars = clean.copy()
