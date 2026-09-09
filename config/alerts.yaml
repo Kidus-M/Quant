@@ -3,6 +3,16 @@
 # This notifies a human. It does not place orders, and there is no code path
 # in this repository that can.
 
+data:
+  # The live runner is the only thing that should be spending a rate limit, so
+  # the real source is selected here rather than in backtest.yaml. Research runs
+  # stay on the offline synthetic generator unless asked otherwise.
+  #
+  # Requires TWELVEDATA_API_KEY in the environment. A .env file is not shipped to
+  # a deployed runner: set it wherever the process actually runs, alongside
+  # TELEGRAM_BOT_TOKEN.
+  adapter: twelvedata
+
 alerts:
   enabled: true
 

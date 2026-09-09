@@ -16,7 +16,11 @@ data:
   resolution: 15min          # resolution the backtest runs on (resampled from base)
   start: "2019-01-01"
   end: "2024-12-31"
-  adapter: twelvedata        # synthetic | csv | parquet | twelvedata | oanda | dukascopy
+  # Research default. Offline, deterministic, and free, so a backtest never
+  # spends the rate limit the live alert runner depends on. config/alerts.yaml
+  # overrides this to a real source for the live runner only; pass
+  # `--set data.adapter=twelvedata` to run a backtest against real bars.
+  adapter: synthetic         # synthetic | csv | parquet | twelvedata | oanda | dukascopy
   cache_dir: data/cache
   quarantine_dir: data/quarantine
 
