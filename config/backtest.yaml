@@ -16,7 +16,7 @@ data:
   resolution: 15min          # resolution the backtest runs on (resampled from base)
   start: "2019-01-01"
   end: "2024-12-31"
-  adapter: synthetic         # synthetic | csv | parquet | twelvedata | oanda | dukascopy
+  adapter: twelvedata        # synthetic | csv | parquet | twelvedata | oanda | dukascopy
   cache_dir: data/cache
   quarantine_dir: data/quarantine
 

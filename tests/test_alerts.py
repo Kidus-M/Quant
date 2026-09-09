@@ -92,6 +92,10 @@ def credentials():
 def alert_cfg(tmp_path):
     cfg = load_configs("config/backtest.yaml", "config/alerts.yaml")
     return cfg.with_overrides({
+        # Pinned rather than inherited: these tests drive the full runner, so a
+        # live production default would have them fetching real bars over a
+        # rate-limited API on every run.
+        "data.adapter": "synthetic",
         "data.cache_dir": str(tmp_path / "cache"),
         "data.quarantine_dir": str(tmp_path / "quarantine"),
         "macro.enabled": False,

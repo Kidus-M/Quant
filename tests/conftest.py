@@ -30,6 +30,11 @@ def base_config() -> Config:
 def cfg(base_config, tmp_path) -> Config:
     """Config pointed at a throwaway cache, with macro off so tests never call out."""
     return base_config.with_overrides({
+        # Pinned, not inherited. Tests must not change behaviour because the
+        # production default in config/backtest.yaml moved, and a suite that
+        # silently starts calling a live API is slow, flaky, and spends a rate
+        # limit that the alert runner needs.
+        "data.adapter": "synthetic",
         "data.start": "2023-01-01",
         "data.end": "2023-04-01",
         "data.cache_dir": str(tmp_path / "cache"),
