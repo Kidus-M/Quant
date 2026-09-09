@@ -44,13 +44,20 @@ python run.py backtest --set costs.slippage_usd_per_oz_per_side=0.25
 
 | Source | Verdict |
 |---|---|
-| **OANDA v20 practice** | **Chosen.** Free practice account, years of M1 history, and `price=BA` returns **separate bid and ask candles**. That last point is the reason it wins: it makes the assumed 0.30 USD/oz round-trip spread a measurement rather than an assertion. Costs an account signup. |
+| **OANDA v20 practice** | **Best on the merits, when you can open an account.** Free practice account, years of M1 history, and `price=BA` returns **separate bid and ask candles** — which makes the assumed 0.30 USD/oz round-trip spread a measurement rather than an assertion. The catch is not technical: OANDA is a broker, and brokers apply residency rules. Where signup is refused there is no token to obtain and no way around it. |
+| **Twelve Data** | **Chosen in practice**, because it is a data vendor rather than a broker, so a free key is issued on signup with no residency check. Everything below is a real cost, not a quibble: no bid/ask (the spread goes back to being an assumption), no volume for metals, history starts around 2020 rather than 2019, 8 requests/minute and 800/day on the free tier, and it **pads non-trading hours with forward-filled rows** — a full 60 bars an hour through Saturday, which the session filter drops on load. Enough for live alerting and for a shorter walk-forward; not the source you would pick if OANDA were available. |
 | Dukascopy | **No longer usable.** Was the original choice for its raw tick feed. As of September 2026 the free datafeed answers `429 Too Many Requests` on a first request for every symbol and date tried, and `503` behind a browser User-Agent. The adapter and its decoder remain in the tree and tested, because the code is correct and the source may return. |
-| Twelve Data | Free tier has 1-minute bars but is rate limited, history is short, and it returns OHLC only — so the cost model's spread would stay an assumption forever. Not enough for a multi-year walk-forward. |
+| HistData.com | Worth knowing about for history: free 1-minute XAUUSD dumps by month, no account and no residency check. Load through the `csv` adapter, and set `data.csv.source_timezone` — the files are US Eastern, not UTC. |
 
 Implemented adapters: `synthetic` (default, offline), `csv` / `parquet` (a vendor
-dump already on disk), `oanda` (live fetch), `dukascopy` (live fetch, source
-currently unavailable), plus `fred` for the macro series.
+dump already on disk), `twelvedata` (live fetch), `oanda` (live fetch),
+`dukascopy` (live fetch, source currently unavailable), plus `fred` for the macro
+series.
+
+Mixing sources across phases has a cost worth stating: validating a strategy on
+one tape and alerting from another means entry levels will not line up exactly,
+because different providers quote spot gold differently. That is tolerable for a
+system that notifies a human. It would not be for one that placed orders.
 
 ### The broker-API boundary
 
