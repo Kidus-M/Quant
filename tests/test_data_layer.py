@@ -229,19 +229,46 @@ def test_load_aborts_when_too_much_data_is_dropped(cfg, calendar):
 # them is correct, but it is ~38% of the load, so the corruption budget and the
 # session budget have to be separate numbers or a correct load cannot complete.
 # ---------------------------------------------------------------------- #
+def _padded_week(corrupt_weekend_bars: int = 0) -> pd.DataFrame:
+    """60 in-session minutes plus 40 weekend minutes, as a padding vendor returns.
+
+    A 40% session drop is close to what the live feed actually produces, so the
+    fixture exercises the real ratio rather than an extreme.
+    """
+    weekend_closes = [1800.0] * 40
+    for i in range(corrupt_weekend_bars):
+        weekend_closes[i] = -1.0
+    trading = make_bars([1800.0] * 60, start="2023-06-07 08:00", freq="1min")
+    weekend = make_bars(weekend_closes, start="2023-06-10 10:00", freq="1min")
+    return pd.concat([trading, weekend]).sort_index()
+
+
 def test_a_padding_source_budgets_session_drops_separately(cfg, calendar):
-    bars = make_bars([1800.0] * 20, start="2023-06-10 10:00", freq="1h")  # all Saturday
+    bars = _padded_week()
     strict = cfg.with_overrides({
         "data.quality.max_flagged_fraction": 0.02,
-        "data.quality.max_outside_session_fraction": 0.95,
+        "data.quality.max_outside_session_fraction": 0.45,
     })
 
     clean, report = run_quality_checks(
         bars, strict, calendar=calendar, pads_outside_session=True
     )
-    assert clean.empty
-    assert report.counts["outside_session"] == 20
+    assert len(clean) == 60
+    assert report.counts["outside_session"] == 40
     assert any("pads non-trading hours" in note for note in report.notes)
+
+
+def test_the_same_load_fails_for_a_source_that_does_not_pad(cfg, calendar):
+    """The exemption is opt-in. Elsewhere an out-of-session bar is still corruption,
+    which is what catches a timezone mistake."""
+    bars = _padded_week()
+    strict = cfg.with_overrides({
+        "data.quality.max_flagged_fraction": 0.02,
+        "data.quality.max_outside_session_fraction": 0.45,
+    })
+
+    with pytest.raises(ValueError, match="max_flagged_fraction"):
+        run_quality_checks(bars, strict, calendar=calendar)
 
 
 def test_a_padding_source_still_has_a_session_ceiling(cfg, calendar):
@@ -281,13 +308,10 @@ def test_a_bar_both_out_of_session_and_corrupt_counts_as_corrupt(cfg, calendar):
     Subtracting would net these bars to zero and hide a genuinely broken feed
     behind the padding allowance.
     """
-    closes = [1800.0] * 100
-    for i in range(10):
-        closes[i] = -1.0
-    bars = make_bars(closes, start="2023-06-10 10:00", freq="1min")  # all Saturday
+    bars = _padded_week(corrupt_weekend_bars=10)
     strict = cfg.with_overrides({
         "data.quality.max_flagged_fraction": 0.02,
-        "data.quality.max_outside_session_fraction": 0.95,
+        "data.quality.max_outside_session_fraction": 0.45,
     })
 
     with pytest.raises(ValueError, match="max_flagged_fraction"):
