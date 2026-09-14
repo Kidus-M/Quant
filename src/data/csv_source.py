@@ -5,6 +5,12 @@ some timezone, OHLCV under any of a dozen spellings. The timezone of the source
 must be stated explicitly in config. There is no autodetection, because a silent
 timezone guess moves every session boundary and shows up only as a strategy that
 mysteriously works.
+
+Named presets exist for sources whose layout is fixed and publicly documented, so
+that using one is a single config key rather than five that must agree. See
+``FORMATS``; ``data.csv.format: histdata`` is the one that matters here, because
+HistData.com is the only free source of XAUUSD 1-minute history going back before
+2020 that needs no account and applies no residency rule.
 """
 from __future__ import annotations
 
@@ -28,6 +34,28 @@ _ALIASES = {
 _TIME_ALIASES = ["timestamp", "time", "datetime", "date", "gmt time", "gmt_time", "local time"]
 
 
+# Presets for vendor dumps with a fixed, documented layout. Each is exactly the
+# set of constructor arguments that layout implies; nothing is inferred at read
+# time. A preset never overrides a value the caller stated explicitly.
+FORMATS: dict[str, dict] = {
+    # HistData.com "ASCII M1" monthly archives, e.g. DAT_ASCII_XAUUSD_M1_202401.csv.
+    # Headerless, semicolon-delimited, one row per minute:
+    #     20240102 000000;2062.61;2063.19;2062.25;2062.75;0
+    # The timestamps are US Eastern *with* daylight saving, which is the whole
+    # reason this preset exists: read as UTC the bars land up to five hours off
+    # and every session boundary moves. Volume is always 0 for metals.
+    "histdata": {
+        "delimiter": ";",
+        "has_header": False,
+        "column_names": ["timestamp", "open", "high", "low", "close", "volume"],
+        "timestamp_column": "timestamp",
+        "timestamp_format": "%Y%m%d %H%M%S",
+        "source_timezone": "America/New_York",
+        "glob": "*.csv",
+    },
+}
+
+
 class CsvBarAdapter(BarAdapter):
     """Reads one file or a directory of files matching a glob."""
 
@@ -37,18 +65,48 @@ class CsvBarAdapter(BarAdapter):
         self,
         path: str | Path,
         *,
-        source_timezone: str = "UTC",
+        source_timezone: str | None = None,
         native_resolution: str = "1min",
-        glob: str = "*.csv",
+        glob: str | None = None,
         timestamp_column: str | None = None,
         timestamp_format: str | None = None,
+        delimiter: str | None = None,
+        has_header: bool | None = None,
+        column_names: list[str] | None = None,
+        format: str | None = None,
     ):
+        preset = self._preset(format)
+        # An explicitly passed argument always wins over the preset, so a vendor
+        # who changes one field does not force the preset to be abandoned whole.
+        def pick(name, value, fallback):
+            return value if value is not None else preset.get(name, fallback)
+
         self.path = resolve_path(path)
-        self.source_timezone = source_timezone
+        self.format = format
+        self.source_timezone = pick("source_timezone", source_timezone, "UTC")
         self.native_resolution = native_resolution
-        self.glob = glob
-        self.timestamp_column = timestamp_column
-        self.timestamp_format = timestamp_format
+        self.glob = pick("glob", glob, "*.csv")
+        self.timestamp_column = pick("timestamp_column", timestamp_column, None)
+        self.timestamp_format = pick("timestamp_format", timestamp_format, None)
+        self.delimiter = pick("delimiter", delimiter, ",")
+        self.has_header = bool(pick("has_header", has_header, True))
+        self.column_names = pick("column_names", column_names, None)
+        if not self.has_header and not self.column_names:
+            raise ValueError(
+                "a headerless file needs data.csv.column_names, or a data.csv.format "
+                f"preset that supplies them. Known presets: {sorted(FORMATS)}"
+            )
+
+    @staticmethod
+    def _preset(name: str | None) -> dict:
+        if not name:
+            return {}
+        key = str(name).strip().lower()
+        if key not in FORMATS:
+            raise ValueError(
+                f"unknown data.csv.format {name!r}. Known presets: {sorted(FORMATS)}"
+            )
+        return FORMATS[key]
 
     def _files(self) -> list[Path]:
         if self.path.is_file():
@@ -73,8 +131,12 @@ class CsvBarAdapter(BarAdapter):
     def _read_one(self, file: Path) -> pd.DataFrame:
         if file.suffix.lower() in (".parquet", ".pq"):
             raw = pd.read_parquet(file)
+        elif self.has_header:
+            raw = pd.read_csv(file, sep=self.delimiter)
         else:
-            raw = pd.read_csv(file)
+            raw = pd.read_csv(
+                file, sep=self.delimiter, header=None, names=list(self.column_names)
+            )
         raw.columns = [str(c).strip() for c in raw.columns]
         lowered = {c.lower(): c for c in raw.columns}
 
@@ -93,7 +155,7 @@ class CsvBarAdapter(BarAdapter):
         parsed = pd.to_datetime(ts, format=self.timestamp_format, utc=False, errors="raise")
         parsed = pd.DatetimeIndex(parsed)
         if parsed.tz is None:
-            parsed = parsed.tz_localize(self.source_timezone).tz_convert("UTC")
+            parsed = self._localise(parsed, file).tz_convert("UTC")
         else:
             parsed = parsed.tz_convert("UTC")
 
@@ -111,6 +173,34 @@ class CsvBarAdapter(BarAdapter):
         frame.index.name = "timestamp"
         log.info("loaded %d rows from %s", len(frame), file.name)
         return frame
+
+
+    def _localise(self, parsed: pd.DatetimeIndex, file: Path) -> pd.DatetimeIndex:
+        """Attach ``source_timezone``, refusing to guess at a DST seam.
+
+        A source stamped in a zone that observes daylight saving has two hours a
+        year that need a decision: one that occurs twice, and one that does not
+        occur at all. Both are silent corruption if resolved by default -- an
+        hour of bars stamped an hour away from where they belong, at a seam, once
+        a year, is close to undiscoverable later.
+
+        For XAUUSD specifically the question should never arise: US transitions
+        happen at 02:00 Eastern on a Sunday, and gold does not reopen until 18:00
+        Eastern, so there are no bars in either window. ``ambiguous="infer"``
+        therefore resolves the ordinary case and anything it cannot resolve is
+        raised with the file named, rather than silently placed.
+        """
+        try:
+            return parsed.tz_localize(self.source_timezone, ambiguous="infer")
+        except ValueError as exc:
+            raise ValueError(
+                f"{file.name}: timestamps could not be placed in "
+                f"{self.source_timezone!r} across a daylight-saving transition "
+                f"({exc}). The file may already be UTC (set "
+                "data.csv.source_timezone: UTC), or it straddles a transition in a "
+                "way that needs an explicit decision. It has NOT been loaded with "
+                "a guess."
+            ) from exc
 
 
 class ParquetBarAdapter(CsvBarAdapter):
