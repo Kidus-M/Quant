@@ -47,12 +47,35 @@ python run.py backtest --set costs.slippage_usd_per_oz_per_side=0.25
 | **OANDA v20 practice** | **Best on the merits, when you can open an account.** Free practice account, years of M1 history, and `price=BA` returns **separate bid and ask candles** — which makes the assumed 0.30 USD/oz round-trip spread a measurement rather than an assertion. The catch is not technical: OANDA is a broker, and brokers apply residency rules. Where signup is refused there is no token to obtain and no way around it. |
 | **Twelve Data** | **Chosen in practice**, because it is a data vendor rather than a broker, so a free key is issued on signup with no residency check. Everything below is a real cost, not a quibble: no bid/ask (the spread goes back to being an assumption), no volume for metals, history starts around 2020 rather than 2019, 8 requests/minute and 800/day on the free tier, and it **pads non-trading hours with forward-filled rows** — a full 60 bars an hour through Saturday, which the session filter drops on load. Enough for live alerting and for a shorter walk-forward; not the source you would pick if OANDA were available. |
 | Dukascopy | **No longer usable.** Was the original choice for its raw tick feed. As of September 2026 the free datafeed answers `429 Too Many Requests` on a first request for every symbol and date tried, and `503` behind a browser User-Agent. The adapter and its decoder remain in the tree and tested, because the code is correct and the source may return. |
-| HistData.com | Worth knowing about for history: free 1-minute XAUUSD dumps by month, no account and no residency check. Load through the `csv` adapter, and set `data.csv.source_timezone` — the files are US Eastern, not UTC. |
+| **HistData.com** | **The way to get real history.** Free 1-minute XAUUSD dumps by month, no account, no residency check, back to 2019 — further than Twelve Data reaches. It is a manual download rather than an API, which is its only real cost. Load with `data.csv.format: histdata`; see below. |
 
 Implemented adapters: `synthetic` (default, offline), `csv` / `parquet` (a vendor
 dump already on disk), `twelvedata` (live fetch), `oanda` (live fetch),
 `dukascopy` (live fetch, source currently unavailable), plus `fred` for the macro
 series.
+
+### Loading HistData history
+
+The one source that gives this project a real multi-year sample without an
+account. Download the monthly **ASCII M1** archives for XAUUSD from
+histdata.com, unzip them into `data/raw/`, then:
+
+```bash
+python run.py backtest --set data.adapter=csv --set data.csv.format=histdata
+```
+
+`format: histdata` is a preset rather than five keys that have to agree. It sets
+the delimiter, the headerless layout, the column order and the timestamp format,
+and — the part that matters — declares the files as **US Eastern, not UTC**. Read
+as UTC every bar lands four or five hours from where it belongs: the session
+filter then drops the London open and keeps the middle of the night, the spread
+multipliers are applied to the wrong hours, and the backtest still runs and still
+prints a number. Any key stated explicitly still overrides the preset.
+
+Because Eastern observes daylight saving, two hours a year are ambiguous or
+nonexistent. Gold is shut at 02:00 Eastern on a Sunday so no bar should fall in
+either window; if one does, the load **fails and names the file** rather than
+placing the bars an hour out. Tests: `tests/test_csv_source.py`.
 
 Mixing sources across phases has a cost worth stating: validating a strategy on
 one tape and alerting from another means entry levels will not line up exactly,
@@ -211,7 +234,7 @@ Every summary shows absolute USD beside every percentage.
 |---|---|
 | `buy_and_hold` | The benchmark. Pays one round trip and carries financing every night, so its net result is not the same as the price change |
 | `random_entry` | The null hypothesis. Not in the comparison table — it *is* the bar |
-| `rsi2` | Connors RSI(2) mean reversion, adapted to intraday |
+| `rsi2` | Connors RSI(2) mean reversion, adapted to intraday, with an ATR loss cap |
 | `trend_donchian` | Donchian breakout with an ATR trailing stop |
 | `trend_macro_filtered` | The same, but longs only while the 10-year real yield is falling on a 20-print basis, shorts only while it is rising |
 
@@ -222,6 +245,44 @@ the holding period by two orders of magnitude while leaving the cost per trade
 untouched, which is exactly the regime where a strategy looks excellent gross and
 loses money net. Treat any strong intraday result with suspicion and check it
 against the random benchmark first.
+
+**The `rsi2` exits.** As published, the only exit is a close back through a short
+moving average — a rule that fires on a favourable move and never on an
+unfavourable one, so a loser was carried until it reverted or the sample ended.
+That shows up in the numbers as a 58% win rate paired with an average loss nearly
+twice the average win: right most of the time, and paying for it once. There is
+now an **ATR loss cap**, fixed at entry rather than trailing, because a trailing
+stop on a mean-reversion entry cuts the trade exactly when the move it is betting
+on begins. `atr_stop_multiple=0` restores the original rules exactly, and a test
+asserts that it does, so the published results stay comparable.
+
+A **time stop** (`max_hold_bars`) exists too but is **off by default and not
+searched**. Measured on 15-minute bars it never binds: with a 5- or 10-bar exit MA
+the close crosses back through long before any plausible limit, so at a 24-bar
+limit it fired on 0.0% of exits. Searching a parameter that changes nothing would
+double the trial count and raise the deflated Sharpe bar for free.
+
+### Trading-hours restriction
+
+A round trip costs 0.95 USD/oz in the Asian session against 0.50 in London/NY
+under the configured spread multipliers, so *when* a strategy trades is a cost
+decision before it is a signal one. `trade_hours_utc=(start, end)` — half-open,
+UTC, wrapping — restricts when a position may be **opened**. Three rules, and the
+asymmetry is the point:
+
+* a position may be opened or reversed only inside the window
+* a position may be **closed on any bar**; a stop that only works office hours is
+  not a stop
+* a trade whose entry bar was suppressed is not entered later, so the filter
+  shifts which trades are taken rather than delaying every one of them into the
+  window's first bar
+
+It is searched on `trend_donchian` only (12 → 24 combinations), because that grid
+is the cheapest of the three and the hypothesis needs testing against the deflated
+Sharpe bar somewhere without doubling every other search. It remains a settable
+parameter on the other strategies. The benchmarks (`buy_and_hold`,
+`random_entry`) do not carry it at all — a session-filtered benchmark is not the
+benchmark the published results were compared against.
 
 ### The random benchmark is a first-class output
 
@@ -365,22 +426,22 @@ created via @BotFather. Settings are in `config/alerts.yaml`, layered on top of
 
 ### What a message contains
 
-Symbol, current price, the entry level, distance in both USD and ATRs, which
-strategy fired and on what rule, an ATR-based suggested stop with what it risks at
-the configured size, the position sizing warning whenever it applies, the evidence
-caveat, and a PAPER SIGNAL footer.
+A message is read on a phone, usually in a hurry, so it leads with the three
+numbers that get acted on — **side, entry, stop** — then the take-profit zone, and
+pushes everything else below them.
 
 ```
 ▲ LONG XAU/USD - approaching
-trend_donchian(atr_stop_multiple=3.0, entry_window=55, ...) on 15min bars
 
-Price        1,768.48
-Entry level  1,780.55
-Distance     12.07 USD/oz (3.64 ATR)
-ATR          3.32 USD/oz
-Suggested stop  1,773.91 (2x ATR from the entry level)
-Risk at 1 oz  6.63 USD if the stop is hit
+Entry  1,780.55
+Stop   1,773.91  (6.64 USD/oz, 2.0 ATR, 6.64 USD at 1 oz)
 
+Take profit  (chance of reaching before the stop)
+TP1    1,787.19   1R   50%
+TP2    1,793.83   2R   33%
+TP3    1,800.47   3R   25%
+
+trend_donchian(entry_window=55) · 15min bars · 12.07 USD/oz away (3.6 ATR)
 Rule: close above the 55-bar high
 
 POSITION SIZING WARNING
@@ -388,9 +449,32 @@ At 50.00 USD equity, the minimum 1 oz position risks 6.6% of the account per ATR
 and 51% per typical daily range. A 1% risk rule needs about 2,536 USD.
 
 Bar 2026-09-04 16:15 UTC | sent 16:37 UTC
+TP odds assume no drift and ignore costs.
 No strategy here has cleared the random-entry benchmark net of costs out of sample.
 PAPER SIGNAL - no order was placed and this engine cannot place one.
 ```
+
+Three things were cut, three kept. Gone: the current price (the distance line
+already says how far away the level is), the standalone ATR line, and the
+separate risk line. Kept, and not negotiable: the **position sizing warning**,
+which on a 50 USD account is the most important line in the message; the
+**evidence caveat**; and the **PAPER SIGNAL** footer.
+
+#### What the take-profit probabilities are, and are not
+
+They are the driftless first-passage result: with the stop `b` away and the
+target `a` away, the chance of touching the target before the stop is
+`b / (a + b)`, so a target at `m` times the risk is reached with probability
+`1 / (1 + m)` — 50% at 1R, 33% at 2R, 25% at 3R.
+
+That is **the null hypothesis, not a forecast**. It is what the numbers look like
+when the strategy has no edge whatsoever, which is precisely the comparison a
+reader needs and the one they are least likely to make unaided: a 3R target reads
+as "about one in four", not as a plan. It assumes no drift and continuous prices,
+and prices in no costs — a gap through either level makes it optimistic. The
+message says so in its own text rather than leaving it implied, and the block is
+**omitted entirely** when there is no usable stop, because an R multiple without
+an R is the whole failure mode.
 
 A setup the filters would currently reject is still reported, with the reason
 ("DFII10 is rising over 20 prints (+0.043), so longs are filtered out"). Hiding it
@@ -464,7 +548,13 @@ state file. Permanent rejections (401/403) are not retried.
 
 - **Live order placement.** Out of scope, and not stubbed. Phase 2 notifies a
   human and nothing more.
-- **Machine learning.** Rules-based strategies only in version one.
+- **Machine learning.** Rules-based strategies only in version one. The
+  infrastructure a model would need already exists — walk-forward with purge and
+  embargo, trial-counted deflated Sharpe, fit-on-train-only normalisation, and
+  truncation-invariance lookahead tests — so a model would drop in as another
+  `Strategy` subclass. The blocker is not the machinery. It is that the trial
+  count, which the deflated Sharpe depends on, stops being countable from a
+  `param_grid` the moment architectures, seeds and epochs become choices.
 
 ## Known limitations
 
