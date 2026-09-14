@@ -10,6 +10,7 @@ import pytest
 
 from src.features.indicators import atr, crossover, donchian, rsi, sma, true_range, wilder_ema
 from src.strategies import CHEAT_STRATEGIES, RESEARCH_STRATEGIES, get_strategy
+from src.strategies.base import restrict_entries_to_hours, trading_hours_mask
 from src.strategies.macro_trend import MacroFilteredTrendStrategy, prints_change
 from src.strategies.rsi2 import Rsi2Strategy
 from src.strategies.trend import DonchianTrendStrategy
@@ -493,3 +494,124 @@ def test_rsi2_max_lookback_ignores_the_holding_limit():
     short = Rsi2Strategy(max_hold_bars=0).max_lookback
     long = Rsi2Strategy(max_hold_bars=5000).max_lookback
     assert short == long
+
+
+# ---------------------------------------------------------------------- #
+# Trading-hours restriction
+# ---------------------------------------------------------------------- #
+def _hourly_index(n=24, start="2023-06-05 00:00"):
+    return pd.date_range(start, periods=n, freq="1h", tz="UTC", name="timestamp")
+
+
+def test_trading_hours_mask_is_half_open():
+    index = _hourly_index()
+    hours = index.hour[trading_hours_mask(index, (7, 16))].tolist()
+    assert hours == list(range(7, 16))          # 16 itself is excluded
+
+
+def test_trading_hours_mask_wraps_past_midnight():
+    index = _hourly_index()
+    hours = sorted(index.hour[trading_hours_mask(index, (22, 3))].tolist())
+    assert hours == [0, 1, 2, 22, 23]
+
+
+def test_trading_hours_mask_admits_everything_when_unset():
+    index = _hourly_index()
+    assert trading_hours_mask(index, None).all()
+
+
+def test_zero_width_window_is_refused():
+    """Silently trading nothing would show up only as a strange report."""
+    with pytest.raises(ValueError, match="zero-width"):
+        trading_hours_mask(_hourly_index(), (9, 9))
+
+
+def test_entry_outside_the_window_is_skipped_not_delayed():
+    index = _hourly_index()
+    # Raw rules want to be long from 05:00, which is outside (7, 16).
+    raw = np.array([0] * 5 + [1] * 6 + [0] * 3 + [1] * 10, dtype="int8")
+
+    out = restrict_entries_to_hours(raw, index, (7, 16))
+
+    assert out[5:11].tolist() == [0] * 6, "a suppressed entry must not be taken"
+    assert out[14] == 1, "a fresh transition inside the window is taken"
+
+
+def test_a_position_can_always_be_closed_outside_the_window():
+    """A stop that only works office hours is not a stop."""
+    index = _hourly_index()
+    raw = np.zeros(24, dtype="int8")
+    raw[8:20] = 1               # enters in-window, exits at 20:00, outside it
+
+    out = restrict_entries_to_hours(raw, index, (7, 16))
+
+    assert out[8] == 1
+    assert out[19] == 1, "the position is carried past the window"
+    assert out[20] == 0, "the exit was blocked by the window"
+
+
+def test_a_reversal_that_cannot_be_taken_goes_flat():
+    """Holding a side the rules have abandoned is worse than being flat."""
+    index = _hourly_index()
+    raw = np.zeros(24, dtype="int8")
+    raw[8:18] = 1
+    raw[18:] = -1               # flips short at 18:00, outside (7, 16)
+
+    out = restrict_entries_to_hours(raw, index, (7, 16))
+
+    assert out[17] == 1
+    assert out[18] == 0, "the blocked reversal should close, not hold the old side"
+    assert (out[18:] == 0).all()
+
+
+def test_restriction_only_ever_removes_exposure():
+    """The filter is a veto. It must never create a position the rules did not."""
+    index = _hourly_index(24 * 14, start="2023-06-05")
+    rng = np.random.default_rng(11)
+    raw = rng.choice([-1, 0, 1], size=len(index)).astype("int8")
+
+    out = restrict_entries_to_hours(raw, index, (7, 16))
+
+    exposed = out != 0
+    # Where the filter leaves exposure it is always the side the raw rules asked
+    # for -- it can veto a position, never invent or invert one.
+    assert (out[exposed] == raw[exposed]).all()
+    assert np.abs(out).sum() <= np.abs(raw).sum()
+
+
+def test_filtered_strategy_never_opens_outside_the_window(bars_15m):
+    strategy = DonchianTrendStrategy(entry_window=20, trade_hours_utc=(7, 16))
+    signals = strategy.generate_signals(bars_15m, strategy.compute_features(bars_15m, None))
+
+    opened = signals[(signals != 0) & (signals.shift(1).fillna(0) != signals)]
+    assert len(opened) > 0, "the filter removed every trade; the test proves nothing"
+    assert opened.index.hour.isin(range(7, 16)).all()
+
+
+def test_unfiltered_strategy_does_open_outside_the_window(bars_15m):
+    """Guards the test above from passing because of the bars rather than the filter."""
+    strategy = DonchianTrendStrategy(entry_window=20, trade_hours_utc=None)
+    signals = strategy.generate_signals(bars_15m, strategy.compute_features(bars_15m, None))
+
+    opened = signals[(signals != 0) & (signals.shift(1).fillna(0) != signals)]
+    assert not opened.index.hour.isin(range(7, 16)).all()
+
+
+def test_benchmarks_do_not_carry_a_trading_hours_parameter():
+    """A session-filtered benchmark is not the benchmark results were compared to."""
+    for name in ("buy_and_hold", "random_entry"):
+        assert "trade_hours_utc" not in get_strategy(name).defaults()
+
+
+def test_session_filter_is_truncation_invariant(bars_15m):
+    """The filter reads its own state and bar i only, never a later bar."""
+    strategy = DonchianTrendStrategy(entry_window=20, trade_hours_utc=(7, 16))
+    full = strategy.generate_signals(bars_15m, strategy.compute_features(bars_15m, None))
+
+    cut = len(bars_15m) // 2
+    truncated_bars = bars_15m.iloc[:cut]
+    truncated = strategy.generate_signals(
+        truncated_bars, strategy.compute_features(truncated_bars, None)
+    )
+
+    pd.testing.assert_series_equal(full.iloc[:cut], truncated)
