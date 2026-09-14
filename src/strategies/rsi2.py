@@ -30,10 +30,16 @@ from src.strategies.base import EntryLevel, Strategy
 
 class Rsi2Strategy(Strategy):
     name = "rsi2"
+    # ``oversold`` drops 15 and the two new axes contribute two values each, so the
+    # grid goes from 24 combinations to 72 rather than to 216. Every combination is
+    # a trial against the deflated Sharpe bar, so widening one axis has to be paid
+    # for by narrowing another.
     param_grid = {
-        "oversold": [5, 10, 15, 20],
+        "oversold": [5, 10, 20],
         "trend_ma": [100, 200, 400],
         "exit_ma": [5, 10],
+        "atr_stop_multiple": [2.0, 3.0],
+        "max_hold_bars": [24, 96],
     }
 
     @classmethod
@@ -46,10 +52,22 @@ class Rsi2Strategy(Strategy):
             "exit_ma": 5,
             "allow_shorts": True,
             "atr_period": 14,
+            # Loss cap, in ATRs from the entry close. Fixed, not trailing: a
+            # trailing stop on a mean-reversion entry would cut the trade exactly
+            # when the move it is betting on begins. 0 disables it.
+            "atr_stop_multiple": 3.0,
+            # Bars a position may be held before it is closed regardless. Mean
+            # reversion that has not reverted is a losing directional bet that
+            # nothing else in the rules will ever close, because the MA exit only
+            # fires on a move back through it. 0 disables it.
+            "max_hold_bars": 96,
         }
 
     @property
     def max_lookback(self) -> int:
+        # max_hold_bars is deliberately absent: it bounds how long a position is
+        # carried, not how far back a feature reads, so it cannot leak across a
+        # walk-forward seam and must not inflate the embargo.
         return int(max(self.params["trend_ma"], self.params["exit_ma"], self.params["rsi_period"],
                        self.params["atr_period"]))
 
@@ -65,44 +83,95 @@ class Rsi2Strategy(Strategy):
             index=bars.index,
         )
 
-    def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
+    def _walk(self, bars: pd.DataFrame, features: pd.DataFrame):
+        """Run the entry/exit state machine once, returning signals and stops.
+
+        Both ``generate_signals`` and ``current_stop`` call this, so the level an
+        alert quotes as "your stop" is produced by the same code that decides the
+        backtested exit, exactly as in the Donchian strategy. A stop written
+        separately for the alerting would be a second definition of the strategy.
+
+        Three things can close a position, in this order of precedence:
+
+        1. the ATR loss cap, because a stop a slower rule can override is not a stop
+        2. the time stop
+        3. the original close-through-the-exit-MA rule
+
+        The first two are the additions. Without them the only exit was the MA
+        cross, which fires on a favourable move and never on an unfavourable one,
+        so losers were held until they reverted or the sample ended. That is
+        visible in the published numbers as a 58% win rate paired with an average
+        loss almost twice the average win.
+        """
         close = bars["close"].to_numpy(dtype="float64")
         rsi_v = features["rsi"].to_numpy(dtype="float64")
         trend = features["trend_ma"].to_numpy(dtype="float64")
         exit_ma = features["exit_ma"].to_numpy(dtype="float64")
+        atr_v = features["atr"].to_numpy(dtype="float64")
 
         oversold = float(self.params["oversold"])
         overbought = float(self.params["overbought"])
         allow_shorts = bool(self.params["allow_shorts"])
+        stop_mult = float(self.params["atr_stop_multiple"])
+        max_hold = int(self.params["max_hold_bars"])
 
         long_entry = (rsi_v < oversold) & (close > trend)
         short_entry = (rsi_v > overbought) & (close < trend) if allow_shorts else np.zeros(len(close), dtype=bool)
         long_exit = close > exit_ma
         short_exit = close < exit_ma
 
+        def entry_stop(price: float, a: float, direction: int) -> float:
+            if stop_mult <= 0 or not np.isfinite(a):
+                return np.nan
+            return price - stop_mult * a if direction > 0 else price + stop_mult * a
+
         # A state machine rather than a vectorised mask: entry and exit conditions
         # can both be true on the same bar, and the position must be carried until
         # its own exit fires. Everything read here is at index i or earlier.
         signal = np.zeros(len(close), dtype="int8")
+        stops = np.full(len(close), np.nan, dtype="float64")
         state = 0
+        stop = np.nan
+        held = 0
+
         for i in range(len(close)):
+            price = close[i]
+            a = atr_v[i]
+
             if state == 0:
                 if long_entry[i]:
-                    state = 1
+                    state, stop, held = 1, entry_stop(price, a, 1), 0
                 elif short_entry[i]:
-                    state = -1
+                    state, stop, held = -1, entry_stop(price, a, -1), 0
             elif state == 1:
-                if long_exit[i]:
-                    state = 0
+                held += 1
+                stopped = np.isfinite(stop) and price < stop
+                timed_out = max_hold > 0 and held >= max_hold
+                if stopped or timed_out or long_exit[i]:
+                    state, stop, held = 0, np.nan, 0
                     if short_entry[i]:
-                        state = -1
+                        state, stop = -1, entry_stop(price, a, -1)
             elif state == -1:
-                if short_exit[i]:
-                    state = 0
+                held += 1
+                stopped = np.isfinite(stop) and price > stop
+                timed_out = max_hold > 0 and held >= max_hold
+                if stopped or timed_out or short_exit[i]:
+                    state, stop, held = 0, np.nan, 0
                     if long_entry[i]:
-                        state = 1
+                        state, stop = 1, entry_stop(price, a, 1)
+
             signal[i] = state
+            stops[i] = stop if state != 0 else np.nan
+        return signal, stops
+
+    def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
+        signal, _ = self._walk(bars, features)
         return pd.Series(signal, index=bars.index, dtype="int8")
+
+    def current_stop(self, bars: pd.DataFrame, features: pd.DataFrame) -> float | None:
+        _, stops = self._walk(bars, features)
+        value = float(stops[-1]) if len(stops) else float("nan")
+        return value if np.isfinite(value) else None
 
     # ------------------------------------------------------------------ #
     # Phase 2: what price would actually trigger this setup on the next bar
