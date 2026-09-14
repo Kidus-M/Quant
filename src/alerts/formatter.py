@@ -1,20 +1,32 @@
 """Message composition.
 
-Every alert carries the same block of context, because a notification that only
-says "RSI2 long setup" is unactionable and, worse, invites the reader to fill in
-the missing numbers optimistically:
+An alert is read on a phone, usually in a hurry, so it leads with the three
+numbers a reader actually acts on and pushes everything else below them:
 
-* symbol and current price
-* the entry level and the distance to it, in USD and in ATRs
-* which strategy fired, and on what rule
-* an ATR-based suggested stop, and what one ATR costs at the configured size
-* the position sizing warning, whenever it applies
-* the evidence caveat, always
-* PAPER SIGNAL, always
+1. **direction** -- LONG or SHORT, in the first line
+2. **entry**
+3. **stop**
 
-The last two are not decoration. This engine is wired to a strategy that has not
-cleared its own benchmark, and a message that omits that reads like a
-recommendation.
+then a take-profit zone, then the context that explains where those came from.
+
+Anything that cannot be acted on has been cut. What has NOT been cut, and must
+not be:
+
+* the position sizing warning, whenever it applies. On a 50 USD account it is the
+  single most important line in the message.
+* the evidence caveat, always. This engine is wired to strategies that have not
+  cleared their own random-entry benchmark, and a message that omits that reads
+  like a recommendation.
+* PAPER SIGNAL, always.
+
+**On the take-profit probabilities.** They are the driftless first-passage
+result: for a target ``a`` away and a stop ``b`` away, the chance of touching the
+target first is ``b / (a + b)``, so a 2R target is hit about a third of the time.
+That is the null hypothesis, not a forecast -- it is what the numbers look like
+when the strategy has no edge at all, which is exactly the comparison a reader
+needs and the one they are least likely to make unaided. It assumes no drift and
+continuous prices, and it prices in no costs; a gap through either level makes it
+optimistic. The message says so in one line rather than leaving it implied.
 """
 from __future__ import annotations
 
@@ -60,54 +72,82 @@ def _fmt_price(value: float) -> str:
     return f"{value:,.2f}" if np.isfinite(value) else "n/a"
 
 
+# R multiples shown in the take-profit zone.
+TP_MULTIPLES = (1.0, 2.0, 3.0)
+
+
+def take_profit_zone(
+    entry: float, stop: float, direction: int, multiples=TP_MULTIPLES
+) -> list[tuple[float, float, float]]:
+    """``(multiple, price, probability)`` for each take-profit level.
+
+    The probability is the driftless first-passage result -- with the stop ``b``
+    away and the target ``a`` away, the chance of touching the target first is
+    ``b / (a + b)``, which for a target at ``m`` times the risk is ``1 / (1 + m)``.
+    No drift, continuous prices, no costs. It is the null, and it is here so that
+    a 3R target is read as "about one in four" rather than as a plan.
+    """
+    risk = abs(entry - stop)
+    if not (np.isfinite(risk) and np.isfinite(entry) and risk > 0):
+        return []
+    sign = 1.0 if direction > 0 else -1.0
+    return [
+        (float(m), entry + sign * float(m) * risk, 1.0 / (1.0 + float(m)))
+        for m in multiples
+    ]
+
+
 def format_alert(context: AlertContext) -> str:
     direction = context.level.side
-    arrow = "▲" if context.level.direction > 0 else "▼"
-    headline = (
-        f"{arrow} <b>{html_escape(direction)} {html_escape(context.symbol)}</b> "
-        f"- {html_escape(context.event)}"
-    )
+    arrow = "\u25b2" if context.level.direction > 0 else "\u25bc"
+    entry = context.level.price
+    stop = context.suggested_stop
+    risk_per_oz = abs(entry - stop)
 
     lines = [
-        headline,
-        f"<b>{html_escape(context.strategy)}</b> on {html_escape(context.resolution)} bars",
+        f"{arrow} <b>{html_escape(direction)} {html_escape(context.symbol)}</b>"
+        f" - {html_escape(context.event)}",
         "",
-        f"Price        <b>{_fmt_price(context.price)}</b>",
-        f"Entry level  <b>{_fmt_price(context.level.price)}</b>",
+        f"Entry  <b>{_fmt_price(entry)}</b>",
     ]
 
-    if context.event == APPROACHING:
-        lines.append(
-            f"Distance     {_fmt_price(abs(context.distance_usd))} USD/oz "
-            f"({context.distance_atr:.2f} ATR)"
-        )
+    # The stop line carries its own distance, so the reader never has to subtract
+    # two five-figure numbers on a phone to find out what the trade risks.
+    if np.isfinite(risk_per_oz) and risk_per_oz > 0:
+        stop_bits = f"{_fmt_price(risk_per_oz)} USD/oz"
+        if np.isfinite(context.atr) and context.atr > 0:
+            stop_bits += f", {risk_per_oz / context.atr:.1f} ATR"
+        if context.position_oz > 0:
+            stop_bits += f", {_fmt_price(risk_per_oz * context.position_oz)} USD at {context.position_oz:g} oz"
+        lines.append(f"Stop   <b>{_fmt_price(stop)}</b>  ({stop_bits})")
     else:
-        lines.append("Distance     level reached")
+        lines.append(f"Stop   <b>{_fmt_price(stop)}</b>")
 
-    lines += [
-        f"ATR          {_fmt_price(context.atr)} USD/oz",
-        f"Suggested stop  <b>{_fmt_price(context.suggested_stop)}</b> "
-        f"({html_escape(context.stop_source)})",
-    ]
+    targets = take_profit_zone(entry, stop, context.level.direction)
+    if targets:
+        lines += ["", "<b>Take profit</b>  (chance of reaching before the stop)"]
+        lines += [
+            f"TP{i}    {_fmt_price(price)}   {multiple:g}R   {probability:.0%}"
+            for i, (multiple, price, probability) in enumerate(targets, start=1)
+        ]
 
-    stop_distance = abs(context.level.price - context.suggested_stop)
-    if np.isfinite(stop_distance) and context.position_oz > 0:
-        risk_usd = stop_distance * context.position_oz
-        lines.append(
-            f"Risk at {context.position_oz:g} oz  {_fmt_price(risk_usd)} USD if the stop is hit"
+    # Context, below the actionable numbers.
+    context_bits = [html_escape(context.strategy), html_escape(context.resolution) + " bars"]
+    if context.event == APPROACHING and np.isfinite(context.distance_usd):
+        context_bits.append(
+            f"{_fmt_price(abs(context.distance_usd))} USD/oz away ({context.distance_atr:.1f} ATR)"
         )
-
+    lines += ["", " \u00b7 ".join(context_bits)]
     if context.level.note:
-        lines += ["", f"Rule: {html_escape(context.level.note)}"]
+        lines.append(f"Rule: {html_escape(context.level.note)}")
 
     if context.level.blocked_by:
         lines.append("")
-        lines.append("<b>Filters currently blocking this setup:</b>")
-        lines += [f"- {html_escape(reason)}" for reason in context.level.blocked_by]
+        lines.append("<b>Blocked:</b> " + html_escape("; ".join(context.level.blocked_by)))
 
     if context.position != 0:
         held = "long" if context.position > 0 else "short"
-        lines += ["", f"Note: the strategy is already {held} as of the last closed bar."]
+        lines.append(f"Already {held} as of the last closed bar.")
 
     warning = format_risk_line(context.risk)
     if warning:
@@ -124,6 +164,7 @@ def format_alert(context: AlertContext) -> str:
             "not a market feed."
         )
     lines += [
+        "<i>TP odds assume no drift and ignore costs.</i>",
         f"<i>{html_escape(context.evidence_note)}</i>",
         "<b>PAPER SIGNAL - no order was placed and this engine cannot place one.</b>",
     ]

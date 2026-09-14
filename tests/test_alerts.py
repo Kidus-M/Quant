@@ -10,6 +10,8 @@ useful or ignorable:
 """
 from __future__ import annotations
 
+import re
+
 import json
 
 import numpy as np
@@ -512,15 +514,36 @@ def test_alert_message_contains_everything_the_spec_requires(alert_cfg):
     text = next(m.text for m in outcome.sent if m.kind == "alert")
 
     assert "XAU/USD" in text                      # symbol
-    assert "Price" in text                        # current price
-    assert "Entry level" in text                  # entry level
-    assert "Distance" in text                     # distance
+    assert "LONG" in text or "SHORT" in text      # direction, first line
+    assert "Entry" in text                        # entry
+    assert "Stop" in text                         # stop
+    assert "Take profit" in text                  # take-profit zone
+    assert "TP1" in text and "TP3" in text
+    assert "USD/oz away" in text                  # distance, for an approach
     assert "trend_donchian" in text               # which strategy fired
-    assert "Suggested stop" in text               # ATR-based suggested stop
     assert "ATR" in text
     assert "POSITION SIZING WARNING" in text      # sizing warning, $50 account
+    assert "assume no drift" in text              # what the TP odds are and are not
     assert "PAPER SIGNAL" in text                 # it notifies, it does not trade
     assert "random-entry benchmark" in text       # evidence caveat
+
+
+def test_direction_and_the_two_key_levels_come_before_everything_else(alert_cfg):
+    """The message is read on a phone: side, entry and stop lead."""
+    bars = _rising_bars()
+    client = RecordingClient()
+    runner = _runner(alert_cfg, bars, client, approach_atr_multiple=20.0,
+                     reset_atr_multiple=60.0, notify_on_trigger=False)
+    outcome = runner.check_once()
+    text = next(m.text for m in outcome.sent if m.kind == "alert")
+
+    plain = re.sub(r"<[^>]+>", "", text)
+    assert ("LONG" in plain.splitlines()[0]) or ("SHORT" in plain.splitlines()[0])
+    assert plain.index("Entry") < plain.index("Take profit")
+    assert plain.index("Stop") < plain.index("Take profit")
+    # Context and caveats sit below the numbers, not above them.
+    assert plain.index("Entry") < plain.index("PAPER SIGNAL")
+    assert plain.index("Stop") < plain.index("POSITION SIZING WARNING")
 
 
 def test_blocked_setups_do_not_alert(alert_cfg):
@@ -687,3 +710,74 @@ def test_html_special_characters_are_escaped():
     from src.alerts.telegram import html_escape
 
     assert html_escape("a < b & c > d") == "a &lt; b &amp; c &gt; d"
+
+
+# ---------------------------------------------------------------------- #
+# Take-profit zone
+# ---------------------------------------------------------------------- #
+def test_take_profit_levels_sit_at_r_multiples_of_the_stop():
+    from src.alerts.formatter import take_profit_zone
+
+    levels = take_profit_zone(entry=100.0, stop=95.0, direction=1)
+
+    assert [m for m, _, _ in levels] == [1.0, 2.0, 3.0]
+    assert [round(p, 6) for _, p, _ in levels] == [105.0, 110.0, 115.0]
+
+
+def test_take_profit_levels_point_the_right_way_for_a_short():
+    from src.alerts.formatter import take_profit_zone
+
+    levels = take_profit_zone(entry=100.0, stop=105.0, direction=-1)
+
+    assert [round(p, 6) for _, p, _ in levels] == [95.0, 90.0, 85.0]
+
+
+def test_take_profit_probabilities_are_the_driftless_first_passage_result():
+    """b / (a + b): a 2R target is reached about a third of the time on no edge."""
+    from src.alerts.formatter import take_profit_zone
+
+    levels = take_profit_zone(entry=100.0, stop=95.0, direction=1)
+    probabilities = [p for _, _, p in levels]
+
+    assert probabilities[0] == pytest.approx(1 / 2)
+    assert probabilities[1] == pytest.approx(1 / 3)
+    assert probabilities[2] == pytest.approx(1 / 4)
+
+
+def test_take_profit_probability_does_not_depend_on_the_size_of_the_risk():
+    """Only the R multiple matters, which is the point of quoting it in R."""
+    from src.alerts.formatter import take_profit_zone
+
+    tight = [p for _, _, p in take_profit_zone(100.0, 99.9, 1)]
+    wide = [p for _, _, p in take_profit_zone(100.0, 50.0, 1)]
+
+    assert tight == pytest.approx(wide)
+
+
+def test_take_profit_zone_is_empty_without_a_usable_stop():
+    """No stop means no R, and inventing one would be the whole failure mode."""
+    from src.alerts.formatter import take_profit_zone
+
+    assert take_profit_zone(100.0, float("nan"), 1) == []
+    assert take_profit_zone(100.0, 100.0, 1) == []
+
+
+def test_message_omits_the_take_profit_block_when_there_is_no_stop(alert_cfg):
+    from src.alerts.formatter import AlertContext, TRIGGERED, format_alert
+    from src.strategies.base import EntryLevel
+
+    context = AlertContext(
+        event=TRIGGERED, strategy="s", strategy_params={}, symbol="XAU/USD",
+        resolution="15min", bar_time=pd.Timestamp("2026-09-04 16:15", tz="UTC"),
+        price=1780.0,
+        level=EntryLevel(direction=1, price=1780.0, kind="breakout"),
+        distance_usd=0.0, distance_atr=0.0, atr=3.0,
+        suggested_stop=float("nan"), stop_source="none", position=0,
+        position_oz=1.0, risk=None, evidence_note="caveat", is_synthetic=False,
+        now=pd.Timestamp("2026-09-04 16:37", tz="UTC"),
+    )
+
+    text = format_alert(context)
+
+    assert "Take profit" not in text
+    assert "PAPER SIGNAL" in text
