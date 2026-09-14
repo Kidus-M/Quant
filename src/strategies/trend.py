@@ -30,9 +30,15 @@ from src.strategies.base import EntryLevel, Strategy
 
 class DonchianTrendStrategy(Strategy):
     name = "trend_donchian"
+    # 24 combinations, from 12. The session axis is searched here and not on the
+    # other strategies because this grid is the cheapest of the three, so the
+    # hypothesis "entries outside London/NY do not pay for their spread" gets
+    # tested against the deflated Sharpe bar somewhere without doubling every
+    # other search. ``trade_hours_utc`` remains a settable parameter everywhere.
     param_grid = {
         "entry_window": [20, 40, 55, 100],
         "atr_stop_multiple": [2.0, 3.0, 4.0],
+        "trade_hours_utc": [None, (7, 16)],
     }
 
     @classmethod
@@ -42,6 +48,13 @@ class DonchianTrendStrategy(Strategy):
             "atr_period": 14,
             "atr_stop_multiple": 3.0,
             "allow_shorts": True,
+            # UTC hours (start, end) in which a position may be OPENED, half-open
+            # and wrapping. None trades every hour, which is what the published
+            # results were produced with. A round trip costs 0.95 USD/oz in the
+            # Asian session against 0.50 in London/NY under the configured spread
+            # multipliers, so restricting entries to (7, 16) or (12, 21) is a cost
+            # decision before it is a signal one. Exits are never restricted.
+            "trade_hours_utc": None,
         }
 
     @property
@@ -123,6 +136,7 @@ class DonchianTrendStrategy(Strategy):
 
     def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
         signal, _ = self._walk(bars, features)
+        signal = self._apply_trade_hours(signal, bars.index)
         return pd.Series(signal, index=bars.index, dtype="int8")
 
     def current_stop(self, bars: pd.DataFrame, features: pd.DataFrame) -> float | None:

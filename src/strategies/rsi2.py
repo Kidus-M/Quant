@@ -69,6 +69,13 @@ class Rsi2Strategy(Strategy):
             # wider exit MA leaves a position with no exit rule that fires on an
             # adverse move.
             "max_hold_bars": 0,
+            # UTC hours (start, end) in which a position may be OPENED, half-open
+            # and wrapping. None trades every hour, which is what the published
+            # results were produced with. A round trip costs 0.95 USD/oz in the
+            # Asian session against 0.50 in London/NY under the configured spread
+            # multipliers, so restricting entries to (7, 16) or (12, 21) is a cost
+            # decision before it is a signal one. Exits are never restricted.
+            "trade_hours_utc": None,
         }
 
     @property
@@ -174,6 +181,7 @@ class Rsi2Strategy(Strategy):
 
     def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
         signal, _ = self._walk(bars, features)
+        signal = self._apply_trade_hours(signal, bars.index)
         return pd.Series(signal, index=bars.index, dtype="int8")
 
     def current_stop(self, bars: pd.DataFrame, features: pd.DataFrame) -> float | None:
