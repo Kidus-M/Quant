@@ -337,3 +337,159 @@ def test_csv_adapter_reports_a_missing_path_clearly(tmp_path):
     with pytest.raises(FileNotFoundError, match="does not exist"):
         adapter.fetch("XAUUSD", pd.Timestamp("2023-01-01", tz="UTC"),
                       pd.Timestamp("2024-01-01", tz="UTC"))
+
+
+# ---------------------------------------------------------------------- #
+# rsi2 exits: the ATR loss cap and the time stop
+# ---------------------------------------------------------------------- #
+def _falling_trade_bars():
+    """A dip that triggers a long, followed by a sustained fall.
+
+    The fall matters: ``long_exit`` is ``close > exit_ma``, so on a monotonically
+    falling series it never fires. Before the stop existed this position had no
+    exit at all and was carried to the end of the sample.
+    """
+    closes = list(np.linspace(100, 130, 16)) + [126.0, 122.0, 119.0, 116.0, 113.0, 110.0]
+    return make_bars(closes)
+
+
+def _stop_strategy(**overrides):
+    params = dict(
+        rsi_period=2, oversold=40, trend_ma=10, exit_ma=3, atr_period=3,
+        atr_stop_multiple=2.0, max_hold_bars=0, allow_shorts=False,
+    )
+    params.update(overrides)
+    return Rsi2Strategy(**params)
+
+
+def test_rsi2_atr_stop_closes_a_losing_trade():
+    bars = _falling_trade_bars()
+    strategy = _stop_strategy()
+    features = strategy.compute_features(bars, None)
+    signals, stops = strategy._walk(bars, features)
+
+    entry = 16
+    assert signals[entry] == 1, "the dip should open a long"
+    expected = bars["close"].iloc[entry] - 2.0 * features["atr"].iloc[entry]
+    assert stops[entry] == pytest.approx(expected)
+
+    # Held while the close is above the stop, closed on the bar that breaches it.
+    assert signals[18] == 1 and bars["close"].iloc[18] > expected
+    assert signals[19] == 0 and bars["close"].iloc[19] < expected
+
+
+def test_rsi2_without_a_stop_rides_the_loser_to_the_end():
+    """Guards the test above from passing for some unrelated reason."""
+    bars = _falling_trade_bars()
+    strategy = _stop_strategy(atr_stop_multiple=0)
+    signals, _ = strategy._walk(bars, strategy.compute_features(bars, None))
+
+    assert signals[-1] == 1, "with no stop the falling position is never closed"
+
+
+def test_rsi2_stop_is_fixed_from_entry_not_trailing():
+    """A mean-reversion entry bets on a move that a trailing stop would cut."""
+    bars = _falling_trade_bars()
+    strategy = _stop_strategy()
+    features = strategy.compute_features(bars, None)
+    signals, stops = strategy._walk(bars, features)
+
+    held = [i for i in range(len(signals)) if signals[i] == 1]
+    levels = {round(float(stops[i]), 9) for i in held}
+    assert len(levels) == 1, f"the stop moved while the trade was open: {levels}"
+    # ATR really does change underneath it, so the constancy is not a coincidence.
+    assert features["atr"].iloc[held[0]] != pytest.approx(features["atr"].iloc[held[-1]])
+
+
+def test_rsi2_current_stop_matches_the_backtested_level():
+    """The alert must quote the level the backtest actually exits on."""
+    bars = _falling_trade_bars()
+    strategy = _stop_strategy()
+    features = strategy.compute_features(bars, None)
+    _, stops = strategy._walk(bars, features)
+
+    open_at = bars.iloc[:18]
+    quoted = strategy.current_stop(open_at, strategy.compute_features(open_at, None))
+    assert quoted == pytest.approx(float(stops[17]))
+
+
+def test_rsi2_reports_no_stop_when_flat():
+    bars = _falling_trade_bars()
+    strategy = _stop_strategy()
+    flat = bars.iloc[:12]
+    assert strategy.current_stop(flat, strategy.compute_features(flat, None)) is None
+
+
+def test_rsi2_time_stop_closes_a_position_that_never_reverts():
+    bars = _falling_trade_bars()
+    # No price stop, so only the time limit can close the falling trade.
+    strategy = _stop_strategy(atr_stop_multiple=0, max_hold_bars=3)
+    signals, _ = strategy._walk(bars, strategy.compute_features(bars, None))
+
+    entry = 16
+    assert signals[entry] == 1
+    assert signals[entry + 2] == 1, "closed before the limit was reached"
+    assert signals[entry + 3] == 0, "the time stop did not fire on the third bar held"
+
+
+def test_rsi2_tightening_the_stop_shortens_the_average_trade(bars_15m):
+    """On real-shaped bars, not a hand-built series."""
+    def mean_hold(mult):
+        strategy = Rsi2Strategy(atr_stop_multiple=mult)
+        signals = strategy.generate_signals(bars_15m, strategy.compute_features(bars_15m, None))
+        runs = (signals != signals.shift(1)).cumsum()
+        held = signals[signals != 0]
+        return held.groupby(runs[signals != 0]).size().mean()
+
+    assert mean_hold(1.0) < mean_hold(4.0)
+
+
+def test_rsi2_disabled_exits_reproduce_the_original_rules(bars_15m):
+    """``atr_stop_multiple=0`` and ``max_hold_bars=0`` must be a true no-op.
+
+    The published results were produced by the MA-exit-only rules. If disabling
+    both switches did not reproduce them exactly, the comparison against those
+    results would be meaningless.
+    """
+    strategy = Rsi2Strategy(atr_stop_multiple=0, max_hold_bars=0)
+    features = strategy.compute_features(bars_15m, None)
+    signals = strategy.generate_signals(bars_15m, features)
+
+    close = bars_15m["close"].to_numpy(dtype="float64")
+    rsi_v = features["rsi"].to_numpy(dtype="float64")
+    trend = features["trend_ma"].to_numpy(dtype="float64")
+    exit_ma = features["exit_ma"].to_numpy(dtype="float64")
+    long_entry = (rsi_v < 10) & (close > trend)
+    short_entry = (rsi_v > 90) & (close < trend)
+
+    expected = np.zeros(len(close), dtype="int8")
+    state = 0
+    for i in range(len(close)):
+        if state == 0:
+            if long_entry[i]:
+                state = 1
+            elif short_entry[i]:
+                state = -1
+        elif state == 1:
+            if close[i] > exit_ma[i]:
+                state = -1 if short_entry[i] else 0
+        elif state == -1:
+            if close[i] < exit_ma[i]:
+                state = 1 if long_entry[i] else 0
+        expected[i] = state
+
+    assert np.array_equal(signals.to_numpy(), expected)
+
+
+def test_rsi2_time_stop_is_not_searched_but_the_stop_is():
+    """An axis that never binds must not cost trials against the deflated Sharpe."""
+    assert "max_hold_bars" not in Rsi2Strategy.param_grid
+    assert "atr_stop_multiple" in Rsi2Strategy.param_grid
+    assert Rsi2Strategy.defaults()["max_hold_bars"] == 0
+
+
+def test_rsi2_max_lookback_ignores_the_holding_limit():
+    """Holding length is not a lookback, and must not inflate the embargo."""
+    short = Rsi2Strategy(max_hold_bars=0).max_lookback
+    long = Rsi2Strategy(max_hold_bars=5000).max_lookback
+    assert short == long
