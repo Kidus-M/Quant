@@ -32,21 +32,21 @@ data:
     annual_drift: 0.0
   csv:
     path: data/raw
-    source_timezone: UTC     # stated, never guessed
+    # A named preset for a vendor whose layout is fixed and documented. Setting
+    # this fills in delimiter, header, column names, timestamp format and source
+    # timezone in one key; anything stated explicitly below still wins.
+    # Known presets: histdata.
+    format: null
+    # Every key below is null so that a preset can supply it. A value stated here
+    # wins over the preset, so overriding one field does not mean abandoning the
+    # rest. With no preset and no value, the timezone falls back to UTC -- stated,
+    # never guessed -- and the file is assumed comma-delimited with a header.
+    source_timezone: null
     timestamp_column: null
     timestamp_format: null
-  twelvedata:
-    # A data vendor, not a broker: a free key is issued on signup with no
-    # residency check, which is why this exists alongside oanda. It publishes no
-    # bid/ask and no volume for metals, so the cost model's spread stays an
-    # assumption and every bar carries volume 0.0. See src/data/twelvedata.py.
-    #
-    # Bars per request. The API caps a response at 5000 rows and TRUNCATES a
-    # longer window silently, so this stays below the cap with room to spare.
-    chunk_bars: 4000
-    # Free ("basic") plan allows 8 requests/minute and 800/day. Requests are
-    # spaced to fit. Raise this only if the plan actually changed.
-    requests_per_minute: 8
+    delimiter: null
+    has_header: null
+    column_names: null
   oanda:
     # practice | live. A practice token will not authenticate against the live
     # host, so this and the token in .env must agree.

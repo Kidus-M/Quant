@@ -85,10 +85,16 @@ def build_adapter(cfg: Config) -> BarAdapter:
         cls = CsvBarAdapter if name == "csv" else ParquetBarAdapter
         return cls(
             path=cfg.get("data.csv.path"),
-            source_timezone=cfg.get("data.csv.source_timezone", "UTC"),
+            # None rather than a literal default, so that a `format` preset can
+            # supply the value. Only a key actually present in config overrides one.
+            source_timezone=cfg.get("data.csv.source_timezone", None),
             native_resolution=cfg.get("data.base_resolution", "1min"),
             timestamp_column=cfg.get("data.csv.timestamp_column", None),
             timestamp_format=cfg.get("data.csv.timestamp_format", None),
+            delimiter=cfg.get("data.csv.delimiter", None),
+            has_header=cfg.get("data.csv.has_header", None),
+            column_names=cfg.get("data.csv.column_names", None),
+            format=cfg.get("data.csv.format", None),
         )
     if name == "dukascopy":
         from src.data.dukascopy import DukascopyAdapter
