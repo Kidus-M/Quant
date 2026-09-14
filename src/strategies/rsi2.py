@@ -30,16 +30,21 @@ from src.strategies.base import EntryLevel, Strategy
 
 class Rsi2Strategy(Strategy):
     name = "rsi2"
-    # ``oversold`` drops 15 and the two new axes contribute two values each, so the
-    # grid goes from 24 combinations to 72 rather than to 216. Every combination is
-    # a trial against the deflated Sharpe bar, so widening one axis has to be paid
-    # for by narrowing another.
+    # 54 combinations, against 24 before the stop was added. ``oversold`` gives up
+    # 15 to pay for it, because every combination is a trial against the deflated
+    # Sharpe bar and a wider search has to clear a higher one.
+    #
+    # ``max_hold_bars`` is deliberately NOT searched. Measured on 15-minute bars it
+    # never binds: with a 5- or 10-bar exit MA the close crosses back through it
+    # long before any plausible time limit, so at 24 bars the time stop fired on
+    # 0.0% of exits. Searching a parameter that changes nothing doubles the trial
+    # count and raises the bar for free. It stays available as a knob because a
+    # wider exit MA or a coarser bar size would make it bind again.
     param_grid = {
         "oversold": [5, 10, 20],
         "trend_ma": [100, 200, 400],
         "exit_ma": [5, 10],
-        "atr_stop_multiple": [2.0, 3.0],
-        "max_hold_bars": [24, 96],
+        "atr_stop_multiple": [1.5, 2.0, 3.0],
     }
 
     @classmethod
@@ -54,13 +59,16 @@ class Rsi2Strategy(Strategy):
             "atr_period": 14,
             # Loss cap, in ATRs from the entry close. Fixed, not trailing: a
             # trailing stop on a mean-reversion entry would cut the trade exactly
-            # when the move it is betting on begins. 0 disables it.
-            "atr_stop_multiple": 3.0,
-            # Bars a position may be held before it is closed regardless. Mean
-            # reversion that has not reverted is a losing directional bet that
-            # nothing else in the rules will ever close, because the MA exit only
-            # fires on a move back through it. 0 disables it.
-            "max_hold_bars": 96,
+            # when the move it is betting on begins. 0 disables it. At 2.0 the
+            # stop accounts for roughly a fifth of exits on 15-minute bars; at 3.0
+            # it is loose enough to fire on under a tenth.
+            "atr_stop_multiple": 2.0,
+            # Bars a position may be held before it is closed regardless. 0
+            # disables it, which is the default because on 15-minute bars it never
+            # binds -- see the note on param_grid. It exists for the case where a
+            # wider exit MA leaves a position with no exit rule that fires on an
+            # adverse move.
+            "max_hold_bars": 0,
         }
 
     @property
