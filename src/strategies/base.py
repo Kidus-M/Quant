@@ -55,6 +55,76 @@ class SignalContractError(ValueError):
     pass
 
 
+def trading_hours_mask(index: pd.DatetimeIndex, window: tuple[int, int] | None) -> np.ndarray:
+    """Bars whose UTC hour falls in ``window``, given as ``(start, end)``.
+
+    Half-open, ``[start, end)``, in whole UTC hours, and it wraps: ``(22, 3)``
+    means 22:00 to 02:59. ``None`` admits every bar.
+
+    UTC rather than local time because the bars are UTC and the cost model's
+    spread multipliers are keyed by UTC hour. Converting to an exchange-local
+    clock here would mean two different definitions of "the London session" in
+    one repository, and the daylight-saving seam between them would move by an
+    hour twice a year without anything failing.
+    """
+    if window is None:
+        return np.ones(len(index), dtype=bool)
+    start, end = (int(window[0]) % 24, int(window[1]) % 24)
+    hours = index.hour.to_numpy()
+    if start == end:
+        # A zero-width window is almost always a typo, and silently trading
+        # nothing (or everything) would be discovered only as a strange report.
+        raise ValueError(
+            f"trade_hours_utc {tuple(window)!r} is a zero-width window. Use None "
+            "for no restriction."
+        )
+    if start < end:
+        return (hours >= start) & (hours < end)
+    return (hours >= start) | (hours < end)
+
+
+def restrict_entries_to_hours(
+    signals: np.ndarray, index: pd.DatetimeIndex, window: tuple[int, int] | None
+) -> np.ndarray:
+    """Allow a position to be opened only inside ``window``; allow exits always.
+
+    Gold's cost per round trip is roughly twice as high in the Asian session as
+    in London/NY -- that is in the configured spread multipliers, not an opinion
+    -- so when a strategy trades is a cost decision as much as a signal one.
+
+    Three rules, and the asymmetry between them is the point:
+
+    * A position may be OPENED or REVERSED only on a bar inside the window.
+    * A position may be CLOSED on any bar. A stop that only works office hours
+      is not a stop.
+    * A trade whose entry bar was suppressed is not entered later. Only a fresh
+      transition counts, so the filter shifts which trades are taken rather than
+      delaying every one of them into the window's first bar.
+
+    Causal by construction: the loop reads ``signals[i]`` and its own state, never
+    a later bar, which is what ``tests/test_lookahead.py`` re-checks by truncation.
+    """
+    allowed = trading_hours_mask(index, window)
+    out = np.zeros(len(signals), dtype="int8")
+    held = 0
+    previous = 0
+    for i in range(len(signals)):
+        want = int(signals[i])
+        if want == 0:
+            held = 0
+        elif want == held:
+            pass
+        elif want != previous and allowed[i]:
+            held = want
+        elif held != 0:
+            # The rules want the other side and we may not take it. Holding a
+            # position the strategy has abandoned is worse than being flat.
+            held = 0
+        previous = want
+        out[i] = held
+    return out
+
+
 class Strategy(ABC):
     """Subclass, set ``name``, declare ``param_grid``, implement the two methods."""
 
@@ -89,6 +159,19 @@ class Strategy(ABC):
     def compute_features(self, bars: pd.DataFrame, macro: pd.DataFrame | None = None) -> pd.DataFrame:
         """Indicators this strategy needs, indexed exactly like ``bars``."""
         return pd.DataFrame(index=bars.index)
+
+    def _apply_trade_hours(self, signal: np.ndarray, index: pd.DatetimeIndex) -> np.ndarray:
+        """Apply this strategy's ``trade_hours_utc`` parameter, if it has one.
+
+        A no-op for a strategy that does not declare the parameter, which is why
+        the benchmarks (``buy_and_hold``, ``random_entry``) are unaffected: a
+        session-filtered benchmark is not the benchmark the results were compared
+        against.
+        """
+        window = self.params.get("trade_hours_utc")
+        if window is None:
+            return signal
+        return restrict_entries_to_hours(signal, index, tuple(window))
 
     @abstractmethod
     def generate_signals(self, bars: pd.DataFrame, features: pd.DataFrame) -> pd.Series:
