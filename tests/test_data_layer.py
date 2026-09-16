@@ -441,3 +441,41 @@ def test_different_symbols_get_different_synthetic_series():
     gold = adapter.fetch("XAUUSD", start, end)
     silver = adapter.fetch("XAGUSD", start, end)
     assert not np.allclose(gold["close"].to_numpy(), silver["close"].to_numpy())
+
+
+# ---------------------------------------------------------------------- #
+# Bins anchored to the session open, so rules longer than an hour can run
+# ---------------------------------------------------------------------- #
+def test_four_hour_bins_are_anchored_to_the_session_open(minute_bars, calendar):
+    """Gold's day is 23:00 -> 22:00. Midnight-anchored 4h bins straddle the break
+    and were refused, so no rule longer than 1h could ever run."""
+    out = resample_bars(minute_bars, "4h", calendar)
+
+    weekday = out[out.index.dayofweek < 4]
+    assert sorted(set(weekday.index.hour)) == [3, 7, 11, 15, 19, 23]
+
+
+def test_no_four_hour_bin_spans_the_daily_break(minute_bars, calendar):
+    out = resample_bars(minute_bars, "4h", calendar)
+
+    # A full 4h bin holds 240 source minutes; the 19:00 bin ends at the 22:00
+    # break and holds at most 180. Nothing holds more than 240, which is what a
+    # bin glued across the break would show.
+    assert int(out["n_source_bars"].max()) <= 240
+    stub = out[out.index.hour == 19]["n_source_bars"]
+    assert len(stub) and int(stub.max()) <= 180
+
+
+def test_session_anchoring_leaves_sub_hour_rules_unchanged(minute_bars, calendar):
+    """23:00 sits on every grid that divides an hour, so 15min and 1h bins are
+    bit-identical to a plain midnight floor."""
+    for rule in ("15min", "1h"):
+        out = resample_bars(minute_bars, rule, calendar)
+        expected = minute_bars.index.floor(rule).unique()
+        assert out.index.isin(expected).all()
+        assert (out.index == out.index.floor(rule)).all()
+
+
+def test_four_hour_resample_accounts_for_every_source_bar(minute_bars, calendar):
+    out = resample_bars(minute_bars, "4h", calendar)
+    assert_no_invented_bars(minute_bars, out)
