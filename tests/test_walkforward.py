@@ -253,3 +253,16 @@ def test_random_paths_reproduce_the_requested_trade_profile(bars_15m):
         holds.append(float(np.count_nonzero(signal)) / max(1, counts[-1]))
     assert 60 < np.mean(counts) < 160
     assert 12 < np.mean(holds) < 30
+
+
+def test_walkforward_exposure_is_measured_not_zero(dataset, cfg):
+    """Exposure read 0.0% for every walk-forward result because the stitched
+    record carried a fabricated all-zero position. It must come from the folds."""
+    walk = WalkForward(dataset, DonchianTrendStrategy, cfg).run()
+    result = walk.as_backtest_result()
+
+    assert result.exposure > 0.0
+    assert walk.oos_position_oz is not None
+    assert (walk.oos_position_oz != 0).any()
+    # Every stitched position bar belongs to the stitched equity index.
+    assert walk.oos_position_oz.index.isin(result.equity_net.index).all()
