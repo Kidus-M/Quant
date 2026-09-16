@@ -348,6 +348,59 @@ deflated Sharpe bar.
 
 ---
 
+## First results on real gold
+
+HistData XAUUSD, 2019-01 to 2026-09, anchored walk-forward, 25,000 USD research
+capital, ~26 folds per strategy. Reports under `reports/histdata_*`. The
+question asked of the resolution sweep was whether the cost-per-trade ratio,
+not the signal, was the binding constraint. For one strategy it was.
+
+### `trend_donchian` across bar sizes
+
+| bars | trades/yr | gross/trade | cost drag | net (7.7 yr) | PF | vs random | deflated Sharpe |
+|---|---|---|---|---|---|---|---|
+| 15min | 177 | 0.41 | 149% | −234 | 0.97 | 75th | 0.000 |
+| 1h | 58 | 1.89 | 37% | +453 | 1.12 | 76th | 0.008 |
+| **4h** | **30** | **7.02** | **12%** | **+1,230** | **1.42** | **90th** | 0.020 |
+| 8h | 7 | 15.94 | 11% | +696 | 1.98 | 85th | 0.003 |
+| 12h | 6 | 22.69 | 11% | +824 | 1.98 | 84th | 0.005 |
+
+Every column moves monotonically from 15min to 4h, and the walk-forward picks
+the London/NY session filter in 20+ of 26 folds at every resolution. Past 4h the
+sample collapses — a median of one or two trades per 90-day fold — and
+multi-day holds start paying overnight financing. **4h is the operating point on
+this tape**, and it clears nothing: 90th percentile against random entry, not
+95th; deflated Sharpe 0.02 against a bar of 0.95. Buy-and-hold made +2,645 on
+one ounce over the same span.
+
+**Tightening the grid to what the search kept choosing made it worse.** With
+`entry_window ∈ {20, 100}`, stop `∈ {2, 3}` and the session filter fixed on —
+4 trials per fold instead of 24 — net fell to +719 and the percentile to 79th.
+The deflated Sharpe rose to 0.13 only because the trial count fell; the raw
+Sharpe dropped. So part of the +1,230 was the wider search getting lucky in a
+few folds, which is exactly what deflation exists to price. Kept as an
+experiment (`reports/histdata_4h_25k_tight/`), not baked into the grid.
+
+### The other two
+
+- **`rsi2`**: gross per trade 0.16 → −0.17 → −2.83 across 15min, 1h, 4h. The
+  direction calls fail on their own before costs are counted. Mean reversion
+  is the wrong thesis for gold at these horizons; slower bars give it more room
+  to be wrong. Not a cost problem.
+- **`trend_macro_filtered`**: 87th, 24th, 52nd, 20th, 18th percentile as bars
+  lengthen, gross flipping sign. It is Donchian plus a real-yield filter and
+  fails to inherit Donchian's monotonic improvement, so the filter removes good
+  trades as readily as bad ones. The 15min result that looked best of the
+  three was noise.
+
+### At 50 USD
+
+Every strategy reached zero within the first out-of-sample quarter — January,
+February and April 2020 — and only one or two folds ran. The position sizing
+warning above is now a dated event in a report rather than a projection.
+
+---
+
 ## Lookahead bias
 
 `tests/test_lookahead.py` is the most important file here. It covers each item on
