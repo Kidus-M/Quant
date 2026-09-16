@@ -28,18 +28,21 @@ def test_market_is_shut_on_saturday(calendar):
     assert not calendar.is_open(saturday).any()
 
 
-def test_week_opens_sunday_at_2200_utc(calendar):
-    index = pd.date_range("2023-06-11 20:00", "2023-06-11 23:00", freq="1h", tz="UTC")
+def test_week_opens_sunday_at_2300_utc(calendar):
+    # Measured on the HistData tape: first bar of the week is Sunday 23:00 UTC.
+    index = pd.date_range("2023-06-11 21:00", "2023-06-12 00:00", freq="1h", tz="UTC")
     assert calendar.is_open(index).tolist() == [False, False, True, True]
 
 
-def test_week_closes_friday_at_2100_utc(calendar):
-    index = pd.date_range("2023-06-09 19:00", "2023-06-09 22:00", freq="1h", tz="UTC")
+def test_week_closes_friday_at_2200_utc(calendar):
+    # Last bar of the week is Friday 21:59 UTC.
+    index = pd.date_range("2023-06-09 20:00", "2023-06-09 23:00", freq="1h", tz="UTC")
     assert calendar.is_open(index).tolist() == [True, True, False, False]
 
 
 def test_daily_break_is_closed(calendar):
-    index = pd.date_range("2023-06-07 20:00", "2023-06-07 23:00", freq="1h", tz="UTC")
+    # 22:00-23:00 UTC, i.e. 17:00-18:00 in the vendor's fixed-EST clock.
+    index = pd.date_range("2023-06-07 21:00", "2023-06-08 00:00", freq="1h", tz="UTC")
     assert calendar.is_open(index).tolist() == [True, False, True, True]
 
 
@@ -424,9 +427,11 @@ def test_synthetic_generator_is_reproducible_across_processes():
     adapter = SyntheticAdapter(seed=7, calendar=SessionCalendar())
     bars = adapter.fetch("XAUUSD", pd.Timestamp("2023-01-01", tz="UTC"),
                          pd.Timestamp("2023-01-05", tz="UTC"))
-    assert len(bars) == 4261
-    assert float(bars["close"].iloc[0]) == pytest.approx(1784.650638, abs=1e-6)
-    assert float(bars["close"].iloc[-1]) == pytest.approx(1828.606307, abs=1e-6)
+    # Regenerated when the session calendar moved to the measured hours
+    # (2026-09-16); confirmed identical across two separate processes.
+    assert len(bars) == 4201
+    assert float(bars["close"].iloc[0]) == pytest.approx(1780.803177, abs=1e-6)
+    assert float(bars["close"].iloc[-1]) == pytest.approx(1808.486727, abs=1e-6)
 
 
 def test_different_symbols_get_different_synthetic_series():
