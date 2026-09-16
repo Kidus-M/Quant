@@ -66,16 +66,19 @@ python run.py backtest --set data.adapter=csv --set data.csv.format=histdata
 
 `format: histdata` is a preset rather than five keys that have to agree. It sets
 the delimiter, the headerless layout, the column order and the timestamp format,
-and — the part that matters — declares the files as **US Eastern, not UTC**. Read
-as UTC every bar lands four or five hours from where it belongs: the session
-filter then drops the London open and keeps the middle of the night, the spread
-multipliers are applied to the wrong hours, and the backtest still runs and still
-prints a number. Any key stated explicitly still overrides the preset.
+and — the part that matters — the timezone. HistData's spec says **"Eastern
+Standard Time (EST) time-zone WITHOUT Day Light Savings adjustments"**: a fixed
+UTC−5 all year, which the preset encodes as `Etc/GMT+5`. Two wrong answers are
+close by. Read as UTC every bar lands five hours from where it belongs. Read as
+`America/New_York` — which observes DST, and which this preset used until the
+vendor spec was checked — every bar from March to November lands one hour early.
+Either way the session filter drops the wrong bars, the spread multipliers hit the
+wrong hours, and the backtest still runs and still prints a number. Any key stated
+explicitly overrides the preset.
 
-Because Eastern observes daylight saving, two hours a year are ambiguous or
-nonexistent. Gold is shut at 02:00 Eastern on a Sunday so no bar should fall in
-either window; if one does, the load **fails and names the file** rather than
-placing the bars an hour out. Tests: `tests/test_csv_source.py`.
+Two more things the files are, that the preset documents: the quotes are **bid**,
+not mid, so the cost model's spread assumption is doing real work on long fills;
+and volume is always zero for metals. Tests: `tests/test_csv_source.py`.
 
 Mixing sources across phases has a cost worth stating: validating a strategy on
 one tape and alerting from another means entry levels will not line up exactly,
