@@ -27,13 +27,16 @@ def _parse_time(value: str) -> time:
 
 @dataclass(frozen=True)
 class SessionCalendar:
+    # Defaults mirror config/backtest.yaml, which is the authority; they exist so
+    # tests and the synthetic generator can build a calendar without a config.
+    # Measured on the HistData tape: Sun 23:00 -> Fri 22:00 UTC, break 22:00-23:00.
     week_open_weekday: int = 6          # Sunday, using Monday=0
-    week_open_time: time = time(22, 0)
+    week_open_time: time = time(23, 0)
     week_close_weekday: int = 4         # Friday
-    week_close_time: time = time(21, 0)
-    daily_break_start: time = time(21, 0)
-    daily_break_end: time = time(22, 0)
-    rollover_hour: int = 21
+    week_close_time: time = time(22, 0)
+    daily_break_start: time = time(22, 0)
+    daily_break_end: time = time(23, 0)
+    rollover_hour: int = 22
 
     @classmethod
     def from_config(cls, cfg: Config) -> "SessionCalendar":
