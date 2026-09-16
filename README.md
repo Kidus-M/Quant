@@ -117,6 +117,14 @@ first time, so it is enforced structurally rather than by intention:
 
 ### Data rules the layer enforces
 
+- **The session calendar is measured, not assumed.** On the HistData tape the
+  week opens Sunday 23:00 UTC, closes Friday 22:00 UTC, and there is a one-hour
+  break at 22:00–23:00 UTC every day — 17:00–18:00 in the vendor's fixed-EST
+  clock, and identical in January and July. The config used to say 21:00–22:00, a
+  textbook figure that follows New York local time. Against the real tape that
+  would have dropped the actual 21:00 hour every day (about 4% of all bars) and
+  aborted the load at the 2% budget. The live Twelve Data feed pads every hour,
+  so it cannot contradict this; whatever the calendar says is what it trades.
 - Bars are stored in **UTC, timezone-aware**. A naive index is rejected outright
   rather than localised with a guess.
 - **1-minute is the only resolution ever written to the cache.** `ParquetBarCache`
@@ -563,10 +571,11 @@ state file. Permanent rejections (401/403) are not retried.
 
 - The OANDA adapter's authenticated happy path is unverified (see above). The
   Dukascopy source is no longer reachable at all.
-- **Every result in this repository so far was measured on synthetic data.** That
-  includes the finding that no strategy beat the random-entry benchmark. It is
-  not evidence that the strategies lack an edge; it is the absence of evidence
-  either way. The walk-forward has never been run on real gold.
+- **Every result committed to this repository so far was measured on synthetic
+  data.** That includes the finding that no strategy beat the random-entry
+  benchmark. Real HistData history (2019–2026) now loads; see
+  `reports/histdata_15min/` for the first walk-forward on real gold, and treat the
+  synthetic-era numbers as the absence of evidence either way.
 - Position size is fixed for the life of a trade. Pyramiding would need a richer
   strategy contract than `{-1, 0, +1}` and is left out rather than half-built.
 - Runs are reproducible: the synthetic generator is seeded from a stable CRC of

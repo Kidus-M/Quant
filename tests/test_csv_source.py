@@ -193,3 +193,30 @@ class TestGenericOptions:
 
         assert len(bars) == 1
         assert bars["high"].iloc[0] == pytest.approx(2.0)
+
+
+class TestParseOnce:
+    def test_repeated_fetches_parse_each_file_once(self, tmp_path, monkeypatch):
+        """The loader calls fetch once per month; local files must not be re-read."""
+        write_histdata(tmp_path)
+        adapter = CsvBarAdapter(tmp_path, format="histdata")
+        calls = []
+        original = adapter._read_one
+        monkeypatch.setattr(adapter, "_read_one", lambda f: calls.append(f) or original(f))
+
+        for _ in range(5):
+            adapter.fetch("XAUUSD", *FULL_RANGE)
+
+        assert len(calls) == 1
+
+    def test_an_edited_file_is_re_read(self, tmp_path):
+        import os, time
+        path = write_histdata(tmp_path)
+        adapter = CsvBarAdapter(tmp_path, format="histdata")
+        assert len(adapter.fetch("XAUUSD", *FULL_RANGE)) == 3
+
+        write_histdata(tmp_path, rows=HISTDATA_ROWS[:1])
+        os.utime(path, (time.time() + 5, time.time() + 5))   # force a new mtime
+
+        assert len(adapter.fetch("XAUUSD", *FULL_RANGE)) == 1
+        assert len(adapter._parsed) == 1

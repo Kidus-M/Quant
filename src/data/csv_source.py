@@ -107,6 +107,11 @@ class CsvBarAdapter(BarAdapter):
                 "a headerless file needs data.csv.column_names, or a data.csv.format "
                 f"preset that supplies them. Known presets: {sorted(FORMATS)}"
             )
+        # Parsed files, keyed by path and mtime. The loader fills its cache one
+        # month at a time, so a seven-year history means ~90 calls to ``fetch``;
+        # re-parsing 170 MB of CSV on each one turned a one-minute load into
+        # forty-five. A network adapter has to pay per call. A local file does not.
+        self._parsed: dict[tuple[Path, float], pd.DataFrame] = {}
 
     @staticmethod
     def _preset(name: str | None) -> dict:
@@ -132,12 +137,22 @@ class CsvBarAdapter(BarAdapter):
     def fetch(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         frames = []
         for file in self._files():
-            frames.append(self._read_one(file))
+            frames.append(self._read_cached(file))
         if not frames:
             return empty_bars()
         bars = pd.concat(frames).sort_index()
         bars = bars[(bars.index >= start) & (bars.index <= end)]
         return normalise_bars(bars)
+
+    def _read_cached(self, file: Path) -> pd.DataFrame:
+        key = (file, file.stat().st_mtime)
+        if key not in self._parsed:
+            # Drop any stale entry for the same path so an edited file is re-read
+            # and the old parse does not linger in memory beside the new one.
+            for stale in [k for k in self._parsed if k[0] == file]:
+                del self._parsed[stale]
+            self._parsed[key] = self._read_one(file)
+        return self._parsed[key]
 
     def _read_one(self, file: Path) -> pd.DataFrame:
         if file.suffix.lower() in (".parquet", ".pq"):
