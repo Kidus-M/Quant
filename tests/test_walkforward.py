@@ -255,10 +255,10 @@ def test_random_paths_reproduce_the_requested_trade_profile(bars_15m):
     assert 12 < np.mean(holds) < 30
 
 
-def test_walkforward_exposure_is_measured_not_zero(dataset, cfg):
+def test_walkforward_exposure_is_measured_not_zero(long_dataset, wf_config):
     """Exposure read 0.0% for every walk-forward result because the stitched
     record carried a fabricated all-zero position. It must come from the folds."""
-    walk = WalkForward(dataset, DonchianTrendStrategy, cfg).run()
+    walk = WalkForward(long_dataset, DonchianTrendStrategy, wf_config).run()
     result = walk.as_backtest_result()
 
     assert result.exposure > 0.0
