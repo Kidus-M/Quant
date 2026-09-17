@@ -615,3 +615,22 @@ def test_session_filter_is_truncation_invariant(bars_15m):
     )
 
     pd.testing.assert_series_equal(full.iloc[:cut], truncated)
+
+
+# ---------------------------------------------------------------------- #
+# Retirement
+# ---------------------------------------------------------------------- #
+def test_retired_strategies_are_out_of_the_default_search_but_runnable_by_name():
+    from src.strategies import RESEARCH_STRATEGIES, RETIRED_STRATEGIES
+
+    for name in ("rsi2", "trend_macro_filtered"):
+        assert name not in RESEARCH_STRATEGIES
+        assert name in RETIRED_STRATEGIES
+        assert get_strategy(name).name == name
+    assert "trend_donchian" in RESEARCH_STRATEGIES
+    assert not set(RESEARCH_STRATEGIES) & set(RETIRED_STRATEGIES)
+
+
+def test_donchian_defaults_to_the_london_new_york_window():
+    """Chosen by the walk-forward in 20+ of 26 folds at every bar size tried."""
+    assert DonchianTrendStrategy.defaults()["trade_hours_utc"] == (7, 16)

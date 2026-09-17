@@ -38,7 +38,7 @@ from src.backtest.walkforward import WalkForward, parameter_sensitivity  # noqa:
 from src.config import load_config, load_configs  # noqa: E402
 from src.data.loader import load_dataset  # noqa: E402
 from src.reporting.summary import StrategyReport, write_report  # noqa: E402
-from src.strategies import RESEARCH_STRATEGIES  # noqa: E402
+from src.strategies import RESEARCH_STRATEGIES, RETIRED_STRATEGIES  # noqa: E402
 
 log = logging.getLogger("run")
 
@@ -83,9 +83,13 @@ def _load(args) -> tuple:
 def _selected(args) -> list[str]:
     if not getattr(args, "strategy", None):
         return list(RESEARCH_STRATEGIES)
-    unknown = [s for s in args.strategy if s not in RESEARCH_STRATEGIES]
+    runnable = {**RESEARCH_STRATEGIES, **RETIRED_STRATEGIES}
+    unknown = [s for s in args.strategy if s not in runnable]
     if unknown:
-        raise SystemExit(f"unknown strategy {unknown}; available: {sorted(RESEARCH_STRATEGIES)}")
+        raise SystemExit(
+            f"unknown strategy {unknown}; available: {sorted(RESEARCH_STRATEGIES)}, "
+            f"retired but runnable by name: {sorted(RETIRED_STRATEGIES)}"
+        )
     return list(args.strategy)
 
 
@@ -140,7 +144,7 @@ def cmd_backtest(args) -> int:
     reports: list[StrategyReport] = []
 
     for name in names:
-        strategy = RESEARCH_STRATEGIES[name]()
+        strategy = {**RESEARCH_STRATEGIES, **RETIRED_STRATEGIES}[name]()
         log.info("running %s", strategy.describe())
         try:
             result = run_backtest(dataset, strategy, cfg)
@@ -171,7 +175,7 @@ def cmd_walkforward(args) -> int:
     reports: list[StrategyReport] = []
 
     for name in names:
-        strategy_class = RESEARCH_STRATEGIES[name]
+        strategy_class = {**RESEARCH_STRATEGIES, **RETIRED_STRATEGIES}[name]
         if not getattr(strategy_class, "param_grid", None):
             log.info("%s has no parameter grid; running it once out of sample instead", name)
             result = run_backtest(dataset, strategy_class(), cfg)

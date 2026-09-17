@@ -61,10 +61,20 @@ def resample_bars(
 
     calendar = calendar or SessionCalendar()
 
-    # .floor() is left-closed and left-labelled by construction: every timestamp in
-    # [10:00, 10:15) maps to 10:00. Using it instead of DataFrame.resample removes
-    # any doubt about how closed=/label=/origin interact.
-    bin_start = bars.index.floor(rule)
+    # Bins are anchored to the daily session open, not to midnight UTC. Gold's
+    # trading day runs 23:00 -> 22:00, so a midnight-anchored 4h bin 20:00-00:00
+    # would contain bars from both sides of the break and be refused below; no
+    # rule longer than one hour could ever run. Anchored at 23:00 the 4h bins are
+    # 23-03, 03-07, ..., 15-19 and a 3-hour stub 19-22 ending at the break.
+    # ``n_source_bars`` records that the stub is short. For any rule that divides
+    # an hour the two anchorings coincide, so 15min and 1h bars are unchanged.
+    #
+    # The arithmetic is still left-closed and left-labelled by construction: every
+    # timestamp in [anchor + k*rule, anchor + (k+1)*rule) maps to the bin start.
+    anchor = _session_anchor(bars.index, calendar)
+    step = pd.Timedelta(rule)
+    k = (bars.index - anchor) // step
+    bin_start = pd.DatetimeIndex(anchor + k * step)
     session = calendar.session_id(bars.index)
 
     session_key = pd.Series(session, index=bars.index, name="session")
@@ -105,6 +115,18 @@ def resample_bars(
 
     out["n_source_bars"] = out["n_source_bars"].astype("int64")
     return out[OHLCV + ["n_source_bars"]]
+
+
+def _session_anchor(index: pd.DatetimeIndex, calendar: SessionCalendar) -> pd.DatetimeIndex:
+    """The most recent daily session open at or before each timestamp.
+
+    The daily break end is the open of every ordinary session; the calendar
+    defines the week open at the same clock time, so it holds on Sunday too.
+    """
+    open_time = calendar.daily_break_end
+    open_offset = pd.Timedelta(hours=open_time.hour, minutes=open_time.minute)
+    shifted = (index - open_offset).floor("1D")
+    return pd.DatetimeIndex(shifted + open_offset, tz="UTC")
 
 
 def assert_no_invented_bars(source: pd.DataFrame, resampled: pd.DataFrame) -> None:

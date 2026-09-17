@@ -17,8 +17,9 @@ pip install -r requirements.txt
 
 python run.py costs               # what the cost model implies, before any strategy
 python run.py risk                # what the configured account size can actually do
-python run.py backtest            # every strategy, full sample, writes reports/summary.md
+python run.py backtest            # every research strategy, full sample, writes reports/summary.md
 python run.py walkforward         # anchored walk-forward, the number that counts
+python run.py walkforward --strategy rsi2   # a retired strategy, by name
 pytest                            # 260 tests, including the lookahead suite
 ```
 
@@ -66,16 +67,19 @@ python run.py backtest --set data.adapter=csv --set data.csv.format=histdata
 
 `format: histdata` is a preset rather than five keys that have to agree. It sets
 the delimiter, the headerless layout, the column order and the timestamp format,
-and — the part that matters — declares the files as **US Eastern, not UTC**. Read
-as UTC every bar lands four or five hours from where it belongs: the session
-filter then drops the London open and keeps the middle of the night, the spread
-multipliers are applied to the wrong hours, and the backtest still runs and still
-prints a number. Any key stated explicitly still overrides the preset.
+and — the part that matters — the timezone. HistData's spec says **"Eastern
+Standard Time (EST) time-zone WITHOUT Day Light Savings adjustments"**: a fixed
+UTC−5 all year, which the preset encodes as `Etc/GMT+5`. Two wrong answers are
+close by. Read as UTC every bar lands five hours from where it belongs. Read as
+`America/New_York` — which observes DST, and which this preset used until the
+vendor spec was checked — every bar from March to November lands one hour early.
+Either way the session filter drops the wrong bars, the spread multipliers hit the
+wrong hours, and the backtest still runs and still prints a number. Any key stated
+explicitly overrides the preset.
 
-Because Eastern observes daylight saving, two hours a year are ambiguous or
-nonexistent. Gold is shut at 02:00 Eastern on a Sunday so no bar should fall in
-either window; if one does, the load **fails and names the file** rather than
-placing the bars an hour out. Tests: `tests/test_csv_source.py`.
+Two more things the files are, that the preset documents: the quotes are **bid**,
+not mid, so the cost model's spread assumption is doing real work on long fills;
+and volume is always zero for metals. Tests: `tests/test_csv_source.py`.
 
 Mixing sources across phases has a cost worth stating: validating a strategy on
 one tape and alerting from another means entry levels will not line up exactly,
@@ -114,6 +118,14 @@ first time, so it is enforced structurally rather than by intention:
 
 ### Data rules the layer enforces
 
+- **The session calendar is measured, not assumed.** On the HistData tape the
+  week opens Sunday 23:00 UTC, closes Friday 22:00 UTC, and there is a one-hour
+  break at 22:00–23:00 UTC every day — 17:00–18:00 in the vendor's fixed-EST
+  clock, and identical in January and July. The config used to say 21:00–22:00, a
+  textbook figure that follows New York local time. Against the real tape that
+  would have dropped the actual 21:00 hour every day (about 4% of all bars) and
+  aborted the load at the 2% budget. The live Twelve Data feed pads every hour,
+  so it cannot contradict this; whatever the calendar says is what it trades.
 - Bars are stored in **UTC, timezone-aware**. A naive index is rejected outright
   rather than localised with a guess.
 - **1-minute is the only resolution ever written to the cache.** `ParquetBarCache`
@@ -234,9 +246,15 @@ Every summary shows absolute USD beside every percentage.
 |---|---|
 | `buy_and_hold` | The benchmark. Pays one round trip and carries financing every night, so its net result is not the same as the price change |
 | `random_entry` | The null hypothesis. Not in the comparison table — it *is* the bar |
-| `rsi2` | Connors RSI(2) mean reversion, adapted to intraday, with an ATR loss cap |
-| `trend_donchian` | Donchian breakout with an ATR trailing stop |
-| `trend_macro_filtered` | The same, but longs only while the 10-year real yield is falling on a 20-print basis, shorts only while it is rising |
+| `trend_donchian` | Donchian breakout with an ATR trailing stop, entries in London/NY hours. **The only strategy still searched by default.** |
+| `rsi2` | *Retired.* Connors RSI(2) mean reversion with an ATR loss cap. On real bars its direction calls lose before costs at every bar size tried |
+| `trend_macro_filtered` | *Retired.* Donchian gated by the 10-year real yield. Fails to inherit Donchian's improvement with bar size, so the filter is noise |
+
+Retired strategies stay in the tree, tested, and runnable by name
+(`--strategy rsi2`, or `alerts.strategies: [rsi2]`), but are out of the default
+comparison: every parameter trial they consume raises the deflated Sharpe bar
+that the remaining strategy has to clear. The evidence is under *First results
+on real gold* below.
 
 **On `rsi2`:** the rules were published in 2008 for daily bars on US equity
 indices, a market with a structural long bias and index-level mean reversion.
@@ -334,6 +352,59 @@ prove it.
 
 A test asserts that the best of 200 pure-noise strategies does **not** clear the
 deflated Sharpe bar.
+
+---
+
+## First results on real gold
+
+HistData XAUUSD, 2019-01 to 2026-09, anchored walk-forward, 25,000 USD research
+capital, ~26 folds per strategy. Reports under `reports/histdata_*`. The
+question asked of the resolution sweep was whether the cost-per-trade ratio,
+not the signal, was the binding constraint. For one strategy it was.
+
+### `trend_donchian` across bar sizes
+
+| bars | trades/yr | gross/trade | cost drag | net (7.7 yr) | PF | vs random | deflated Sharpe |
+|---|---|---|---|---|---|---|---|
+| 15min | 177 | 0.41 | 149% | −234 | 0.97 | 75th | 0.000 |
+| 1h | 58 | 1.89 | 37% | +453 | 1.12 | 76th | 0.008 |
+| **4h** | **30** | **7.02** | **12%** | **+1,230** | **1.42** | **90th** | 0.020 |
+| 8h | 7 | 15.94 | 11% | +696 | 1.98 | 85th | 0.003 |
+| 12h | 6 | 22.69 | 11% | +824 | 1.98 | 84th | 0.005 |
+
+Every column moves monotonically from 15min to 4h, and the walk-forward picks
+the London/NY session filter in 20+ of 26 folds at every resolution. Past 4h the
+sample collapses — a median of one or two trades per 90-day fold — and
+multi-day holds start paying overnight financing. **4h is the operating point on
+this tape**, and it clears nothing: 90th percentile against random entry, not
+95th; deflated Sharpe 0.02 against a bar of 0.95. Buy-and-hold made +2,645 on
+one ounce over the same span.
+
+**Tightening the grid to what the search kept choosing made it worse.** With
+`entry_window ∈ {20, 100}`, stop `∈ {2, 3}` and the session filter fixed on —
+4 trials per fold instead of 24 — net fell to +719 and the percentile to 79th.
+The deflated Sharpe rose to 0.13 only because the trial count fell; the raw
+Sharpe dropped. So part of the +1,230 was the wider search getting lucky in a
+few folds, which is exactly what deflation exists to price. Kept as an
+experiment (`reports/histdata_4h_25k_tight/`), not baked into the grid.
+
+### The other two
+
+- **`rsi2`**: gross per trade 0.16 → −0.17 → −2.83 across 15min, 1h, 4h. The
+  direction calls fail on their own before costs are counted. Mean reversion
+  is the wrong thesis for gold at these horizons; slower bars give it more room
+  to be wrong. Not a cost problem.
+- **`trend_macro_filtered`**: 87th, 24th, 52nd, 20th, 18th percentile as bars
+  lengthen, gross flipping sign. It is Donchian plus a real-yield filter and
+  fails to inherit Donchian's monotonic improvement, so the filter removes good
+  trades as readily as bad ones. The 15min result that looked best of the
+  three was noise.
+
+### At 50 USD
+
+Every strategy reached zero within the first out-of-sample quarter — January,
+February and April 2020 — and only one or two folds ran. The position sizing
+warning above is now a dated event in a report rather than a projection.
 
 ---
 
@@ -560,10 +631,11 @@ state file. Permanent rejections (401/403) are not retried.
 
 - The OANDA adapter's authenticated happy path is unverified (see above). The
   Dukascopy source is no longer reachable at all.
-- **Every result in this repository so far was measured on synthetic data.** That
-  includes the finding that no strategy beat the random-entry benchmark. It is
-  not evidence that the strategies lack an edge; it is the absence of evidence
-  either way. The walk-forward has never been run on real gold.
+- **Every result committed to this repository so far was measured on synthetic
+  data.** That includes the finding that no strategy beat the random-entry
+  benchmark. Real HistData history (2019–2026) now loads; see
+  `reports/histdata_15min/` for the first walk-forward on real gold, and treat the
+  synthetic-era numbers as the absence of evidence either way.
 - Position size is fixed for the life of a trade. Pyramiding would need a richer
   strategy contract than `{-1, 0, +1}` and is left out rather than half-built.
 - Runs are reproducible: the synthetic generator is seeded from a stable CRC of

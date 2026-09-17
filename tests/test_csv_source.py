@@ -14,8 +14,10 @@ import pytest
 
 from src.data.csv_source import FORMATS, CsvBarAdapter
 
-# One January row (EST, UTC-5) and one July row (EDT, UTC-4). Any implementation
-# that applies a fixed offset instead of a real timezone gets exactly one wrong.
+# One January row and one July row. HistData stamps a FIXED UTC-5 all year ("EST
+# without Day Light Savings adjustments", per their spec), so both convert by the
+# same five hours. An implementation that used America/New_York -- as this preset
+# originally did -- would get the July row an hour early.
 HISTDATA_ROWS = [
     "20240102 000000;2062.61;2063.19;2062.25;2062.75;0",
     "20240102 000100;2062.75;2062.90;2062.40;2062.50;0",
@@ -51,10 +53,11 @@ class TestHistDataPreset:
         write_histdata(tmp_path)
         bars = fetch(tmp_path, format="histdata")
 
-        # 00:00 EST (UTC-5) -> 05:00 UTC
+        # 00:00 UTC-5 -> 05:00 UTC
         assert bars.index[0] == pd.Timestamp("2024-01-02 05:00:00", tz="UTC")
-        # 12:00 EDT (UTC-4) -> 16:00 UTC, not 17:00. A fixed -5 offset fails here.
-        assert bars.index[-1] == pd.Timestamp("2024-07-01 16:00:00", tz="UTC")
+        # 12:00 UTC-5 -> 17:00 UTC in July too. America/New_York would say 16:00.
+        assert bars.index[-1] == pd.Timestamp("2024-07-01 17:00:00", tz="UTC")
+
 
     def test_index_is_utc_and_named(self, tmp_path):
         write_histdata(tmp_path)
@@ -84,14 +87,15 @@ class TestHistDataPreset:
         write_histdata(tmp_path)
         fetch(tmp_path, format="histdata", source_timezone="UTC")
 
-        assert FORMATS["histdata"]["source_timezone"] == "America/New_York"
+        assert FORMATS["histdata"]["source_timezone"] == "Etc/GMT+5"
 
 
 class TestDaylightSavingSeams:
-    """Gold is shut at 02:00 Eastern on a Sunday, so these rows should not exist.
+    """The refusal-to-guess path, exercised with a DST zone stated explicitly.
 
-    If a file ever does contain them, the load must fail loudly rather than place
-    the bars an hour from where they belong.
+    The histdata preset itself is a fixed offset, so it has no seams. These tests
+    override the timezone to a DST-observing one to prove that a source which
+    DOES have them fails loudly rather than placing bars an hour out.
     """
 
     def test_ambiguous_hour_is_refused_not_guessed(self, tmp_path):
@@ -99,14 +103,14 @@ class TestDaylightSavingSeams:
         write_histdata(tmp_path, rows=["20241103 013000;2740.10;2741.00;2739.80;2740.55;0"])
 
         with pytest.raises(ValueError, match="daylight-saving"):
-            fetch(tmp_path, format="histdata")
+            fetch(tmp_path, format="histdata", source_timezone="America/New_York")
 
     def test_nonexistent_hour_is_refused_not_shifted(self, tmp_path):
         # 2024-03-10 02:30 Eastern never happened.
         write_histdata(tmp_path, rows=["20240310 023000;2180.10;2181.00;2179.80;2180.55;0"])
 
         with pytest.raises(ValueError, match="daylight-saving"):
-            fetch(tmp_path, format="histdata")
+            fetch(tmp_path, format="histdata", source_timezone="America/New_York")
 
     def test_error_names_the_file_and_says_nothing_was_loaded(self, tmp_path):
         write_histdata(
@@ -116,16 +120,30 @@ class TestDaylightSavingSeams:
         )
 
         with pytest.raises(ValueError) as excinfo:
-            fetch(tmp_path, format="histdata")
+            fetch(tmp_path, format="histdata", source_timezone="America/New_York")
 
         message = str(excinfo.value)
         assert "DAT_ASCII_XAUUSD_M1_202411.csv" in message
         assert "NOT been loaded" in message
 
-    def test_a_year_of_ordinary_eastern_timestamps_localises(self, tmp_path):
-        """The seams must not make the common case fail."""
+    def test_the_fixed_offset_preset_has_no_seams_at_all(self, tmp_path):
+        """Rows inside both US transition windows load fine under the real preset."""
+        rows = [
+            "20240310 023000;2180.10;2181.00;2179.80;2180.55;0",   # 'nonexistent' in NY
+            "20241103 013000;2740.10;2741.00;2739.80;2740.55;0",   # 'ambiguous' in NY
+        ]
+        write_histdata(tmp_path, rows=rows)
+
+        bars = fetch(tmp_path, format="histdata")
+
+        assert list(bars.index) == [
+            pd.Timestamp("2024-03-10 07:30:00", tz="UTC"),
+            pd.Timestamp("2024-11-03 06:30:00", tz="UTC"),
+        ]
+
+    def test_a_year_of_ordinary_dst_zone_timestamps_localises(self, tmp_path):
+        """The seam guard must not make the common case fail for a real DST zone."""
         stamps = pd.date_range("2024-01-01", "2024-12-31", freq="7h")
-        # Drop the two transition windows, as a real gold feed does.
         keep = [t for t in stamps if not (
             (t.month == 3 and t.day == 10 and t.hour == 2)
             or (t.month == 11 and t.day == 3 and t.hour == 1)
@@ -133,7 +151,7 @@ class TestDaylightSavingSeams:
         rows = [f"{t.strftime('%Y%m%d %H%M%S')};2000.0;2001.0;1999.0;2000.5;0" for t in keep]
         write_histdata(tmp_path, rows=rows)
 
-        bars = fetch(tmp_path, format="histdata")
+        bars = fetch(tmp_path, format="histdata", source_timezone="America/New_York")
 
         assert len(bars) == len(keep)
         assert bars.index.is_monotonic_increasing
@@ -175,3 +193,30 @@ class TestGenericOptions:
 
         assert len(bars) == 1
         assert bars["high"].iloc[0] == pytest.approx(2.0)
+
+
+class TestParseOnce:
+    def test_repeated_fetches_parse_each_file_once(self, tmp_path, monkeypatch):
+        """The loader calls fetch once per month; local files must not be re-read."""
+        write_histdata(tmp_path)
+        adapter = CsvBarAdapter(tmp_path, format="histdata")
+        calls = []
+        original = adapter._read_one
+        monkeypatch.setattr(adapter, "_read_one", lambda f: calls.append(f) or original(f))
+
+        for _ in range(5):
+            adapter.fetch("XAUUSD", *FULL_RANGE)
+
+        assert len(calls) == 1
+
+    def test_an_edited_file_is_re_read(self, tmp_path):
+        import os, time
+        path = write_histdata(tmp_path)
+        adapter = CsvBarAdapter(tmp_path, format="histdata")
+        assert len(adapter.fetch("XAUUSD", *FULL_RANGE)) == 3
+
+        write_histdata(tmp_path, rows=HISTDATA_ROWS[:1])
+        os.utime(path, (time.time() + 5, time.time() + 5))   # force a new mtime
+
+        assert len(adapter.fetch("XAUUSD", *FULL_RANGE)) == 1
+        assert len(adapter._parsed) == 1

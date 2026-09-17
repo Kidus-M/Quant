@@ -10,7 +10,9 @@ Named presets exist for sources whose layout is fixed and publicly documented, s
 that using one is a single config key rather than five that must agree. See
 ``FORMATS``; ``data.csv.format: histdata`` is the one that matters here, because
 HistData.com is the only free source of XAUUSD 1-minute history going back before
-2020 that needs no account and applies no residency rule.
+2020 that needs no account and applies no residency rule. Its timezone is a fixed
+UTC-5 with no daylight saving -- the vendor says so explicitly -- and the preset
+encodes exactly that.
 """
 from __future__ import annotations
 
@@ -38,19 +40,28 @@ _TIME_ALIASES = ["timestamp", "time", "datetime", "date", "gmt time", "gmt_time"
 # set of constructor arguments that layout implies; nothing is inferred at read
 # time. A preset never overrides a value the caller stated explicitly.
 FORMATS: dict[str, dict] = {
-    # HistData.com "ASCII M1" monthly archives, e.g. DAT_ASCII_XAUUSD_M1_202401.csv.
+    # HistData.com "ASCII M1" archives, e.g. DAT_ASCII_XAUUSD_M1_202401.csv.
     # Headerless, semicolon-delimited, one row per minute:
     #     20240102 000000;2062.61;2063.19;2062.25;2062.75;0
-    # The timestamps are US Eastern *with* daylight saving, which is the whole
-    # reason this preset exists: read as UTC the bars land up to five hours off
-    # and every session boundary moves. Volume is always 0 for metals.
+    #
+    # Timestamps are, in the vendor's own words, "Eastern Standard Time (EST)
+    # time-zone WITHOUT Day Light Savings adjustments": a fixed UTC-5 all year.
+    # That is NOT America/New_York, which observes DST and would place every bar
+    # from March to November one hour early. Etc/GMT+5 is the POSIX spelling of a
+    # fixed UTC-5 (the sign is inverted by convention). This preset originally
+    # used America/New_York; the vendor spec was checked and it was wrong.
+    #
+    # Prices are BID quotes, not mid. A long fills at the ask, so a bid tape
+    # understates long entries and overstates long exits by half the spread --
+    # the cost model's spread assumption is doing that work here, not the data.
+    # Volume is always 0 for metals.
     "histdata": {
         "delimiter": ";",
         "has_header": False,
         "column_names": ["timestamp", "open", "high", "low", "close", "volume"],
         "timestamp_column": "timestamp",
         "timestamp_format": "%Y%m%d %H%M%S",
-        "source_timezone": "America/New_York",
+        "source_timezone": "Etc/GMT+5",
         "glob": "*.csv",
     },
 }
@@ -96,6 +107,11 @@ class CsvBarAdapter(BarAdapter):
                 "a headerless file needs data.csv.column_names, or a data.csv.format "
                 f"preset that supplies them. Known presets: {sorted(FORMATS)}"
             )
+        # Parsed files, keyed by path and mtime. The loader fills its cache one
+        # month at a time, so a seven-year history means ~90 calls to ``fetch``;
+        # re-parsing 170 MB of CSV on each one turned a one-minute load into
+        # forty-five. A network adapter has to pay per call. A local file does not.
+        self._parsed: dict[tuple[Path, float], pd.DataFrame] = {}
 
     @staticmethod
     def _preset(name: str | None) -> dict:
@@ -121,12 +137,22 @@ class CsvBarAdapter(BarAdapter):
     def fetch(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         frames = []
         for file in self._files():
-            frames.append(self._read_one(file))
+            frames.append(self._read_cached(file))
         if not frames:
             return empty_bars()
         bars = pd.concat(frames).sort_index()
         bars = bars[(bars.index >= start) & (bars.index <= end)]
         return normalise_bars(bars)
+
+    def _read_cached(self, file: Path) -> pd.DataFrame:
+        key = (file, file.stat().st_mtime)
+        if key not in self._parsed:
+            # Drop any stale entry for the same path so an edited file is re-read
+            # and the old parse does not linger in memory beside the new one.
+            for stale in [k for k in self._parsed if k[0] == file]:
+                del self._parsed[stale]
+            self._parsed[key] = self._read_one(file)
+        return self._parsed[key]
 
     def _read_one(self, file: Path) -> pd.DataFrame:
         if file.suffix.lower() in (".parquet", ".pq"):

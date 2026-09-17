@@ -86,6 +86,10 @@ class WalkForwardResult:
     deflated: DeflatedSharpeResult | None = None
     sensitivity: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: list[str] = field(default_factory=list)
+    # Concatenated out-of-sample position, so that exposure is a measurement.
+    # Optional only so older call sites that build this by hand keep working;
+    # the harness always fills it.
+    oos_position_oz: pd.Series | None = None
 
     def folds_frame(self) -> pd.DataFrame:
         return pd.DataFrame([f.as_row() for f in self.folds])
@@ -93,7 +97,14 @@ class WalkForwardResult:
     def as_backtest_result(self) -> BacktestResult:
         """The concatenated out-of-sample record, shaped like a single backtest so
         the metrics and reporting code needs no special case."""
-        position = pd.Series(0.0, index=self.oos_equity_net.index, name="position_oz")
+        if self.oos_position_oz is not None:
+            position = self.oos_position_oz.reindex(self.oos_equity_net.index).fillna(0.0)
+        else:
+            # Without the stitched position the exposure figure would read 0.0%
+            # for every walk-forward result -- which it did, silently, until the
+            # harness started carrying the real series through.
+            position = pd.Series(0.0, index=self.oos_equity_net.index)
+        position = position.rename("position_oz")
         empty = pd.Series(0, index=self.oos_equity_net.index, dtype="int8")
         ruin = self.oos_equity_net[self.oos_equity_net <= 0]
         return BacktestResult(
@@ -258,6 +269,7 @@ class WalkForward:
         folds: list[Fold] = []
         trial_sharpes: list[float] = []
         equity_pieces: list[pd.Series] = []
+        position_pieces: list[pd.Series] = []
         cost_pieces: list[pd.Series] = []
         trade_frames: list[pd.DataFrame] = []
         warnings: list[str] = []
@@ -331,6 +343,7 @@ class WalkForward:
                 continue
             last_emitted = result.equity_net.index[keep].max()
             equity_pieces.append(result.equity_net[keep])
+            position_pieces.append(result.position_oz[keep])
             cost_pieces.append(result.costs_cum[keep] - float(result.costs_cum[keep].iloc[0]))
             if len(result.trades):
                 trade_frames.append(result.trades.assign(fold=number))
@@ -359,6 +372,7 @@ class WalkForward:
             raise ValueError("walk-forward produced no out-of-sample results")
 
         oos_equity = pd.concat(equity_pieces)
+        oos_position = pd.concat(position_pieces)
         oos_costs = _stitch_costs(cost_pieces)
         # Gross is rebuilt as net plus cumulative costs so the gross/net/cost
         # decomposition stays consistent across the fold seams, where each fold
@@ -378,6 +392,7 @@ class WalkForward:
             oos_equity_net=oos_equity.rename("equity_net"),
             oos_equity_gross=oos_gross.rename("equity_gross"),
             oos_costs_cum=oos_costs.rename("costs_cum"),
+            oos_position_oz=oos_position.rename("position_oz"),
             oos_trades=trades,
             initial_capital=self.capital,
             bars_per_year=bars_per_year(oos_equity.index),

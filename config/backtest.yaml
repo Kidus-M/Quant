@@ -13,7 +13,11 @@ instrument:
 
 data:
   base_resolution: 1min      # the ONLY resolution ever written to the cache as source
-  resolution: 15min          # resolution the backtest runs on (resampled from base)
+  # Resolution the backtest runs on (resampled from base). 4h since 2026-09-17:
+  # on real 2019-2026 bars the cost-per-trade ratio dominated everything at
+  # 15min and 1h, and 4h is the slowest resolution that still yields enough
+  # trades to measure. See README, "First results on real gold".
+  resolution: 4h
   start: "2019-01-01"
   end: "2024-12-31"
   # Research default. Offline, deterministic, and free, so a backtest never
@@ -92,16 +96,22 @@ macro:
   publication_lag_days: 1
   cache_dir: data/cache/fred
 
-# The market calendar. Gold trades roughly Sun 22:00 UTC -> Fri 21:00 UTC with a
-# short daily break. Resampling must not invent bars across these gaps.
+# The market calendar. MEASURED on the HistData XAUUSD tape (2019-2026), not
+# assumed: the week opens Sunday 23:00 UTC, closes Friday 22:00 UTC, and there
+# is a one-hour break 22:00-23:00 UTC every day -- 17:00-18:00 in the vendor's
+# fixed-EST clock, and identical in January and July. The previous values were
+# one hour earlier across the board (a textbook figure that follows New York
+# local time and shifts with DST); against this tape they would have dropped the
+# real 21:00 hour every day, about 4% of all bars, and aborted the load.
+# Resampling must not invent bars across these gaps.
 session:
   week_open_weekday: 6       # Sunday
-  week_open_time_utc: "22:00"
+  week_open_time_utc: "23:00"
   week_close_weekday: 4      # Friday
-  week_close_time_utc: "21:00"
-  daily_break_start_utc: "21:00"
-  daily_break_end_utc: "22:00"
-  rollover_hour_utc: 21      # financing is charged on positions held past this
+  week_close_time_utc: "22:00"
+  daily_break_start_utc: "22:00"
+  daily_break_end_utc: "23:00"
+  rollover_hour_utc: 22      # financing is charged on positions held past this
 
 costs:
   # Pessimistic by default. Every one of these makes results worse, never better.

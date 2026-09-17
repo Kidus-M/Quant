@@ -13,7 +13,7 @@ from src.backtest.benchmark import run_random_benchmark
 from src.backtest.engine import run_backtest
 from src.config import resolve_path
 from src.reporting.summary import StrategyReport, build_markdown, write_report
-from src.strategies import RESEARCH_STRATEGIES
+from src.strategies import RESEARCH_STRATEGIES, get_strategy
 from src.strategies.base import Strategy
 from tests.conftest import make_bars, make_dataset
 
@@ -21,7 +21,7 @@ from tests.conftest import make_bars, make_dataset
 def _reports(dataset, cfg, names=("buy_and_hold", "rsi2"), capital=100_000.0, benchmark=False):
     out = []
     for name in names:
-        result = run_backtest(dataset, RESEARCH_STRATEGIES[name](), cfg, initial_capital=capital)
+        result = run_backtest(dataset, get_strategy(name), cfg, initial_capital=capital)
         bench = (
             run_random_benchmark(dataset, result, cfg, n_runs=60, seed=3)
             if benchmark and name != "buy_and_hold" else None

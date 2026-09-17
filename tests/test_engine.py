@@ -84,9 +84,9 @@ def test_short_positions_receive_a_financing_credit(cfg):
 
 
 def test_gross_net_and_costs_decompose_exactly(cfg, dataset):
-    from src.strategies import RESEARCH_STRATEGIES
+    from src.strategies import RESEARCH_STRATEGIES, get_strategy
 
-    result = run_backtest(dataset, RESEARCH_STRATEGIES["rsi2"](), cfg, initial_capital=100_000.0)
+    result = run_backtest(dataset, get_strategy("rsi2"), cfg, initial_capital=100_000.0)
     reconstructed = result.equity_gross - result.costs_cum
     pd.testing.assert_series_equal(
         reconstructed.rename("equity_net"), result.equity_net, check_exact=False, atol=1e-9
