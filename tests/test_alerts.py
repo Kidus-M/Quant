@@ -583,6 +583,32 @@ def test_blocked_setups_do_not_alert(alert_cfg):
     assert [m for m in outcome.sent if m.kind == "alert"] == []
 
 
+def test_bar_age_is_measured_from_the_bar_close_not_its_label(alert_cfg):
+    """On 15min bars the last CLOSED bar is the one before the newest, and it
+    closed at the newest bar's label. So a clock sitting exactly there sees an
+    age of zero, and one bar later sees fifteen minutes -- not thirty.
+
+    Measured from the label instead, a healthy 4h feed reads as up to eight
+    hours stale, so the threshold would have to be set so wide that a dead
+    feed goes unnoticed for most of a day.
+    """
+    bars = _rising_bars()
+    newest_label = bars.index[-1]                       # dropped as still forming
+    at_close = _runner(alert_cfg, bars, RecordingClient(), now=newest_label,
+                       max_bar_age_minutes=10, heartbeat_hours=999).check_once()
+    assert not at_close.stale
+
+    one_bar_on = _runner(alert_cfg, bars, RecordingClient(),
+                         now=newest_label + pd.Timedelta(minutes=15),
+                         max_bar_age_minutes=10, heartbeat_hours=999).check_once()
+    assert one_bar_on.stale
+
+    tolerant = _runner(alert_cfg, bars, RecordingClient(),
+                       now=newest_label + pd.Timedelta(minutes=15),
+                       max_bar_age_minutes=20, heartbeat_hours=999).check_once()
+    assert not tolerant.stale
+
+
 def test_stale_data_warns_once_rather_than_going_quiet(alert_cfg):
     bars = _rising_bars()
     client = RecordingClient()
