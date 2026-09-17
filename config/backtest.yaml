@@ -13,7 +13,11 @@ instrument:
 
 data:
   base_resolution: 1min      # the ONLY resolution ever written to the cache as source
-  resolution: 15min          # resolution the backtest runs on (resampled from base)
+  # Resolution the backtest runs on (resampled from base). 4h since 2026-09-17:
+  # on real 2019-2026 bars the cost-per-trade ratio dominated everything at
+  # 15min and 1h, and 4h is the slowest resolution that still yields enough
+  # trades to measure. See README, "First results on real gold".
+  resolution: 4h
   start: "2019-01-01"
   end: "2024-12-31"
   # Research default. Offline, deterministic, and free, so a backtest never

@@ -54,7 +54,9 @@ class DonchianTrendStrategy(Strategy):
             # Asian session against 0.50 in London/NY under the configured spread
             # multipliers, so restricting entries to (7, 16) or (12, 21) is a cost
             # decision before it is a signal one. Exits are never restricted.
-            "trade_hours_utc": None,
+            # (7, 16) since 2026-09-17: the walk-forward chose it in 20+ of 26
+            # folds at every bar size tried on real 2019-2026 gold.
+            "trade_hours_utc": (7, 16),
         }
 
     @property

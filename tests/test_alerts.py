@@ -477,8 +477,18 @@ def test_runner_stays_quiet_when_price_is_far_from_every_level(alert_cfg):
     assert [m for m in outcome.sent if m.kind == "alert"] == []
 
 
-def test_runner_does_not_send_approach_alerts_while_in_a_position(alert_cfg):
+def test_runner_does_not_send_approach_alerts_while_in_a_position(alert_cfg, monkeypatch):
     # A steady uptrend puts the Donchian strategy long and keeps it there.
+    # The session filter is switched off here on purpose: these bars first
+    # break out around 22:00 UTC, which the default (7, 16) window skips and,
+    # by design, never enters later. That behaviour has its own tests; this
+    # one is about what the runner does once a position exists.
+    from src.strategies.trend import DonchianTrendStrategy
+    original = DonchianTrendStrategy.defaults
+    monkeypatch.setattr(
+        DonchianTrendStrategy, "defaults",
+        classmethod(lambda cls: {**original(), "trade_hours_utc": None}),
+    )
     bars = _rising_bars(n=500, step=1.0)
     client = RecordingClient()
     runner = _runner(alert_cfg, bars, client, approach_atr_multiple=50.0,

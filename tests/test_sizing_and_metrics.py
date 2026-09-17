@@ -171,9 +171,9 @@ def test_time_underwater_counts_bars_below_the_peak():
 
 def test_metrics_decompose_gross_costs_and_net(cfg, dataset):
     from src.backtest.engine import run_backtest
-    from src.strategies import RESEARCH_STRATEGIES
+    from src.strategies import RESEARCH_STRATEGIES, get_strategy
 
-    result = run_backtest(dataset, RESEARCH_STRATEGIES["rsi2"](), cfg, initial_capital=100_000.0)
+    result = run_backtest(dataset, get_strategy("rsi2"), cfg, initial_capital=100_000.0)
     metrics = compute_metrics(result)
     assert metrics.net_pnl_usd == pytest.approx(metrics.gross_pnl_usd - metrics.total_cost_usd)
     assert metrics.total_cost_usd == pytest.approx(sum(metrics.cost_breakdown_usd.values()))

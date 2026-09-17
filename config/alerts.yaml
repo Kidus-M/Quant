@@ -17,7 +17,10 @@ alerts:
   enabled: true
 
   # Which strategies to watch. Names come from the research registry.
-  strategies: [trend_donchian, rsi2]
+  # rsi2 was removed 2026-09-17: on real 2019-2026 bars its direction calls
+  # lose money before costs at every bar size tried. See README, "First
+  # results on real gold".
+  strategies: [trend_donchian]
 
   # Shown in messages. The instrument itself comes from instrument.symbol.
   symbol_label: XAU/USD
@@ -39,11 +42,14 @@ alerts:
   # Suggested stop distance in the message, in ATRs. Suggestion only.
   stop_atr_multiple: 2.0
 
-  # If the newest bar is older than this, something upstream is broken. Say so
-  # once, rather than letting silence look like "no setups".
-  max_bar_age_minutes: 90
-  # How far back to pull on each check.
-  lookback_days: 30
+  # If the newest closed bar closed longer ago than this, something upstream is
+  # broken. Say so once, rather than letting silence look like "no setups".
+  # Must exceed one bar of data.resolution (4h = 240), because the bar after the
+  # last closed one is legitimately still forming for that long.
+  max_bar_age_minutes: 300
+  # How far back to pull on each check. Donchian's 100-bar window on 4h bars is
+  # about 24 calendar days; this leaves margin for the ATR warm-up and holidays.
+  lookback_days: 45
 
   # Silence must be distinguishable from a crashed process.
   heartbeat_hours: 6
@@ -56,9 +62,12 @@ alerts:
   state_path: data/alerts_state.json
 
   # Printed in every message. Phase 1 did not certify any of these strategies.
+  # Best result on real 2019-2026 bars: Donchian on 4h, 90th percentile of
+  # random entry (bar is 95th), deflated Sharpe 0.02 (bar is 0.95).
   evidence_note: >-
     No strategy here has cleared the random-entry benchmark net of costs out of
-    sample. These are research prompts, not trade recommendations.
+    sample; the best sits at the 90th percentile against a 95th bar. These are
+    research prompts, not trade recommendations.
 
   # true = format and log messages without contacting Telegram.
   dry_run: false

@@ -44,7 +44,7 @@ from src.backtest.sizing import PositionSizer, risk_diagnostics
 from src.config import Config
 from src.data.loader import load_dataset
 from src.features.indicators import atr as atr_indicator
-from src.strategies import RESEARCH_STRATEGIES
+from src.strategies import RESEARCH_STRATEGIES, RETIRED_STRATEGIES
 from src.strategies.base import EntryLevel, Strategy, validate_signals
 
 log = logging.getLogger(__name__)
@@ -157,11 +157,14 @@ class AlertRunner:
             )
 
         self.sizer = PositionSizer.from_config(cfg)
-        unknown = [s for s in self.settings.strategies if s not in RESEARCH_STRATEGIES]
+        # A retired strategy may still be watched if named explicitly; retirement
+        # takes it out of the default search, not out of reach.
+        runnable = {**RESEARCH_STRATEGIES, **RETIRED_STRATEGIES}
+        unknown = [s for s in self.settings.strategies if s not in runnable]
         if unknown:
             raise ValueError(
                 f"alerts.strategies names unknown strategies {unknown}; "
-                f"available: {sorted(RESEARCH_STRATEGIES)}"
+                f"available: {sorted(runnable)}"
             )
 
     # ------------------------------------------------------------------ #
@@ -238,7 +241,13 @@ class AlertRunner:
         outcome.last_bar = last_bar
         outcome.market_open = bool(dataset.calendar.is_open(pd.DatetimeIndex([now]))[0])
 
-        age_minutes = (now - last_bar).total_seconds() / 60.0
+        # Age is measured from when the last closed bar *closed*, not from its
+        # label: a bar labelled 23:00 on a 4h chart is complete at 03:00, and
+        # the one after it is legitimately still forming until 07:00. Measured
+        # from the label, a healthy 4h feed would read as eight hours stale.
+        # ``max_bar_age_minutes`` therefore has to exceed one bar of resolution.
+        closed_at = last_bar + pd.Timedelta(dataset.resolution)
+        age_minutes = (now - closed_at).total_seconds() / 60.0
         outcome.stale = age_minutes > self.settings.max_bar_age_minutes and outcome.market_open
         if outcome.stale:
             if not self.store.stale_data_notified:
@@ -268,7 +277,7 @@ class AlertRunner:
 
     # ------------------------------------------------------------------ #
     def _check_strategy(self, name, dataset, bars, macro, now, outcome: CheckOutcome) -> None:
-        strategy: Strategy = RESEARCH_STRATEGIES[name]()
+        strategy: Strategy = {**RESEARCH_STRATEGIES, **RETIRED_STRATEGIES}[name]()
         if len(bars) <= strategy.max_lookback + 2:
             outcome.errors.append(
                 f"{name}: only {len(bars)} bars loaded but {strategy.max_lookback} are "
