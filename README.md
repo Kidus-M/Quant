@@ -17,8 +17,9 @@ pip install -r requirements.txt
 
 python run.py costs               # what the cost model implies, before any strategy
 python run.py risk                # what the configured account size can actually do
-python run.py backtest            # every strategy, full sample, writes reports/summary.md
+python run.py backtest            # every research strategy, full sample, writes reports/summary.md
 python run.py walkforward         # anchored walk-forward, the number that counts
+python run.py walkforward --strategy rsi2   # a retired strategy, by name
 pytest                            # 260 tests, including the lookahead suite
 ```
 
@@ -245,9 +246,15 @@ Every summary shows absolute USD beside every percentage.
 |---|---|
 | `buy_and_hold` | The benchmark. Pays one round trip and carries financing every night, so its net result is not the same as the price change |
 | `random_entry` | The null hypothesis. Not in the comparison table — it *is* the bar |
-| `rsi2` | Connors RSI(2) mean reversion, adapted to intraday, with an ATR loss cap |
-| `trend_donchian` | Donchian breakout with an ATR trailing stop |
-| `trend_macro_filtered` | The same, but longs only while the 10-year real yield is falling on a 20-print basis, shorts only while it is rising |
+| `trend_donchian` | Donchian breakout with an ATR trailing stop, entries in London/NY hours. **The only strategy still searched by default.** |
+| `rsi2` | *Retired.* Connors RSI(2) mean reversion with an ATR loss cap. On real bars its direction calls lose before costs at every bar size tried |
+| `trend_macro_filtered` | *Retired.* Donchian gated by the 10-year real yield. Fails to inherit Donchian's improvement with bar size, so the filter is noise |
+
+Retired strategies stay in the tree, tested, and runnable by name
+(`--strategy rsi2`, or `alerts.strategies: [rsi2]`), but are out of the default
+comparison: every parameter trial they consume raises the deflated Sharpe bar
+that the remaining strategy has to clear. The evidence is under *First results
+on real gold* below.
 
 **On `rsi2`:** the rules were published in 2008 for daily bars on US equity
 indices, a market with a structural long bias and index-level mean reversion.
