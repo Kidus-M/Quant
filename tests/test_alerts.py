@@ -817,3 +817,54 @@ def test_message_omits_the_take_profit_block_when_there_is_no_stop(alert_cfg):
 
     assert "Take profit" not in text
     assert "PAPER SIGNAL" in text
+
+
+# ---------------------------------------------------------------------- #
+# A broken feed must not be silent
+#
+# A corrupt cache file made load_bars raise on every pass. The error branch
+# returned before the heartbeat, so the bot logged an error every five minutes
+# for hours and sent nothing at all. Silence is supposed to mean a crashed
+# process; here the process was alive and equally silent.
+# ---------------------------------------------------------------------- #
+class ExplodingRunner(StubRunner):
+    def load_bars(self):
+        raise RuntimeError("Parquet magic bytes not found in footer")
+
+
+def _exploding(alert_cfg, bars, client, **overrides):
+    settings = AlertSettings.from_config(alert_cfg)
+    for key, value in overrides.items():
+        setattr(settings, key, value)
+    settings.validate()
+    return ExplodingRunner(
+        alert_cfg, bars=bars, client=client, settings=settings,
+        clock=lambda: bars.index[-1] + pd.Timedelta(minutes=15),
+    )
+
+
+def test_a_failing_data_load_still_sends_a_heartbeat(alert_cfg):
+    client = RecordingClient()
+    runner = _exploding(alert_cfg, _rising_bars(), client, send_startup_heartbeat=True)
+
+    outcome = runner.check_once()
+
+    assert outcome.errors, "the failure should still be recorded"
+    beats = [m for m in outcome.sent if m.kind == "heartbeat"]
+    assert beats, "a persistent load failure produced total silence"
+    assert "NOT RUNNING" in beats[0].text
+    assert "Parquet magic bytes" in beats[0].text
+
+
+def test_a_failing_data_load_does_not_send_a_heartbeat_every_poll(alert_cfg):
+    """One message per heartbeat interval, not one per five-minute poll."""
+    client = RecordingClient()
+    runner = _exploding(alert_cfg, _rising_bars(), client,
+                        send_startup_heartbeat=True, heartbeat_hours=6)
+
+    first = runner.check_once()
+    assert [m for m in first.sent if m.kind == "heartbeat"]
+
+    for _ in range(5):
+        again = runner.check_once()
+        assert [m for m in again.sent if m.kind == "heartbeat"] == [], "heartbeat repeated"
