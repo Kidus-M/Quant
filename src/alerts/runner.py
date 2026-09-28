@@ -225,12 +225,21 @@ class AlertRunner:
             message = f"data load failed: {type(exc).__name__}: {exc}"
             log.error(message)
             outcome.errors.append(message)
+            # The heartbeat still has to go out. This branch used to return
+            # early, which meant a persistent load failure produced total
+            # silence on Telegram -- indistinguishable from a quiet market,
+            # and the exact failure the heartbeat exists to rule out. A
+            # corrupt cache file once kept this path running every five
+            # minutes for hours without a single message being sent.
+            self._heartbeat_without_data(outcome, now, message)
             self._persist()
             return outcome
 
         bars = dataset.bars
         if bars.empty:
-            outcome.errors.append("no bars available")
+            message = "no bars available"
+            outcome.errors.append(message)
+            self._heartbeat_without_data(outcome, now, message, dataset=dataset)
             self._persist()
             return outcome
 
@@ -420,6 +429,38 @@ class AlertRunner:
             daily_range_usd_per_oz=daily_range,
             warning_threshold_pct=float(self.cfg.get("sizing.risk_per_atr_warning_pct", 5.0)),
         )
+
+    def _heartbeat_without_data(self, outcome: CheckOutcome, now, problem: str, dataset=None) -> None:
+        """Heartbeat when there are no bars to describe.
+
+        Reports the failure in the strategy-state block, so the message a
+        reader already scans for "what is it doing" says "it is broken" instead
+        of going quiet. Everything else about heartbeat timing is unchanged:
+        this respects the same interval, so a broken feed produces one message
+        every ``heartbeat_hours``, not one every poll.
+        """
+        first_ever = self.store.last_heartbeat_epoch is None
+        if first_ever and not self.settings.send_startup_heartbeat:
+            self.store.record_heartbeat(now.timestamp())
+            return
+        if not self.store.heartbeat_due(interval_hours=self.settings.heartbeat_hours,
+                                        now=now.timestamp()):
+            return
+        text = format_heartbeat(
+            symbol=self.settings.symbol_label,
+            now=now,
+            last_bar=None,
+            bars_seen=0,
+            checks=self.store.checks,
+            strategy_states=[f"NOT RUNNING - {problem}"],
+            armed_setups=len(self.store.active_setups()),
+            market_open=False,
+            evidence_note=self.settings.evidence_note,
+            is_synthetic=bool(dataset.provenance.is_synthetic) if dataset is not None else False,
+            stale=True,
+        )
+        if self._send("heartbeat", "heartbeat", text, outcome):
+            self.store.record_heartbeat(now.timestamp())
 
     def _maybe_heartbeat(self, outcome: CheckOutcome, dataset, bars, now) -> None:
         first_ever = self.store.last_heartbeat_epoch is None

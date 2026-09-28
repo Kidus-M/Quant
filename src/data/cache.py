@@ -15,6 +15,9 @@ Design decisions worth stating, because both prevent a class of quiet corruption
 """
 from __future__ import annotations
 
+import os
+import time
+
 import json
 import logging
 from dataclasses import dataclass
@@ -125,6 +128,59 @@ class ParquetBarCache:
                 missing.append(period)
         return missing
 
+    # ------------------------------------------------------------------ #
+    # Durability
+    #
+    # Both of these exist because of a real outage. The alert runner was
+    # OOM-killed part-way through ``to_parquet``, which left a truncated file.
+    # Every later pass then found the month "missing", refetched it from the
+    # vendor, tried to merge with the existing chunk, and died reading it --
+    # "Parquet magic bytes not found in footer" -- once every five minutes for
+    # hours, spending API calls each time and never recovering, because nothing
+    # in the loop could remove the bad file.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _write_atomic(frame: pd.DataFrame, path: Path) -> None:
+        """Write via a temp file in the same directory, then rename.
+
+        ``Path.replace`` is ``os.replace``, which is atomic on POSIX and on
+        Windows. A process killed mid-write leaves the temp file, never a
+        half-written parquet in the cache: readers see either the old complete
+        file or the new complete file.
+        """
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            frame.to_parquet(tmp)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _read_or_quarantine(self, path: Path) -> pd.DataFrame | None:
+        """Read a cached parquet, or move it aside and return None.
+
+        Returning None means "treat this month as absent", which the caller
+        already knows how to handle: it refetches. Deleting outright would
+        destroy the evidence, so the file is renamed with a suffix instead and
+        the cache moves on. A corrupt file must never be able to wedge the
+        loader forever.
+        """
+        try:
+            return pd.read_parquet(path)
+        except Exception as exc:          # pyarrow raises several unrelated types
+            corrupt = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            try:
+                path.replace(corrupt)
+            except OSError:
+                path.unlink(missing_ok=True)
+                corrupt = None
+            log.error(
+                "cache file %s is unreadable (%s: %s); moved to %s and treating the "
+                "month as missing so it is refetched",
+                path.name, type(exc).__name__, exc,
+                corrupt.name if corrupt else "<deleted>",
+            )
+            return None
+
     def write(self, key: CacheKey, bars: pd.DataFrame) -> None:
         if key.resolution != self.base_resolution:
             raise ValueError(
@@ -146,10 +202,11 @@ class ParquetBarCache:
             period = pd.Period(month, freq="M")
             path = out_dir / f"{period}.parquet"
             if path.exists():
-                existing = pd.read_parquet(path)
-                chunk = pd.concat([existing, chunk])
-                chunk = chunk[~chunk.index.duplicated(keep="last")].sort_index()
-            chunk.to_parquet(path)
+                existing = self._read_or_quarantine(path)
+                if existing is not None:
+                    chunk = pd.concat([existing, chunk])
+                    chunk = chunk[~chunk.index.duplicated(keep="last")].sort_index()
+            self._write_atomic(chunk, path)
             month_end = period.end_time.tz_localize("UTC")
             manifest[str(period)] = {
                 "rows": int(len(chunk)),
@@ -173,7 +230,9 @@ class ParquetBarCache:
         for period in periods:
             path = out_dir / f"{period}.parquet"
             if path.exists():
-                frames.append(pd.read_parquet(path))
+                frame = self._read_or_quarantine(path)
+                if frame is not None:
+                    frames.append(frame)
         if not frames:
             from src.data.base import empty_bars
 
@@ -202,9 +261,22 @@ class SeriesCache:
         path = self.path(series_id)
         if not path.exists():
             return None
-        frame = pd.read_parquet(path)
+        try:
+            frame = pd.read_parquet(path)
+        except Exception as exc:
+            # Same failure mode, same remedy: a truncated macro file must not
+            # wedge every later load.
+            log.error("macro cache %s is unreadable (%s); refetching", path.name, exc)
+            path.unlink(missing_ok=True)
+            return None
         return frame[series_id]
 
     def write(self, series_id: str, values: pd.Series) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        values.rename(series_id).to_frame().to_parquet(self.path(series_id))
+        path = self.path(series_id)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            values.rename(series_id).to_frame().to_parquet(tmp)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)

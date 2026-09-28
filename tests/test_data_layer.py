@@ -479,3 +479,76 @@ def test_session_anchoring_leaves_sub_hour_rules_unchanged(minute_bars, calendar
 def test_four_hour_resample_accounts_for_every_source_bar(minute_bars, calendar):
     out = resample_bars(minute_bars, "4h", calendar)
     assert_no_invented_bars(minute_bars, out)
+
+
+# ---------------------------------------------------------------------- #
+# Cache durability
+#
+# Reproduces a real outage: the runner was OOM-killed mid-write, leaving a
+# truncated parquet. Every later pass refetched the month, tried to merge with
+# the bad file, and died reading it -- once every five minutes for hours,
+# spending vendor API calls each time, with no way to recover.
+# ---------------------------------------------------------------------- #
+def _cache_with_month(tmp_path, minute_bars):
+    cache = ParquetBarCache(tmp_path, base_resolution="1min")
+    key = CacheKey(adapter="test", symbol="XAUUSD", resolution="1min")
+    cache.write(key, minute_bars)
+    files = sorted((tmp_path / "test" / "XAUUSD" / "1min").glob("*.parquet"))
+    assert files, "nothing was cached"
+    return cache, key, files[0]
+
+
+def _truncate(path):
+    """Exactly what an interrupted write leaves: a file with no footer."""
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])
+
+
+def test_a_truncated_cache_file_does_not_wedge_the_reader(tmp_path, minute_bars):
+    cache, key, path = _cache_with_month(tmp_path, minute_bars)
+    corrupt_month = path.stem
+    _truncate(path)
+
+    bars = cache.read(key, minute_bars.index[0], minute_bars.index[-1])
+
+    # The corrupt month reads as absent; the healthy months still come back.
+    assert corrupt_month not in set(bars.index.strftime("%Y-%m"))
+    assert len(bars) > 0, "the whole cache was discarded, not just the bad month"
+    assert not path.exists(), "the corrupt file was left in place to fail again"
+    assert list(path.parent.glob("*.corrupt-*")), "evidence was destroyed rather than kept"
+
+
+def test_a_truncated_cache_file_does_not_wedge_the_writer(tmp_path, minute_bars):
+    """This is where the outage actually died: merging with the existing chunk."""
+    cache, key, path = _cache_with_month(tmp_path, minute_bars)
+    _truncate(path)
+
+    cache.write(key, minute_bars)          # must not raise
+
+    bars = cache.read(key, minute_bars.index[0], minute_bars.index[-1])
+    assert len(bars) == len(minute_bars), "the month did not heal on the next write"
+
+
+def test_a_cache_write_leaves_no_half_written_file(tmp_path, minute_bars, monkeypatch):
+    """A write killed part-way must leave the previous file intact."""
+    cache, key, path = _cache_with_month(tmp_path, minute_bars)
+    good = path.read_bytes()
+
+    def die(self, *args, **kwargs):
+        raise KeyboardInterrupt("OOM-killed mid-write")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", die)
+    with pytest.raises(KeyboardInterrupt):
+        cache.write(key, minute_bars)
+
+    assert path.read_bytes() == good, "the existing cache file was damaged"
+    assert not list(path.parent.glob("*.tmp")), "a temp file was left behind"
+
+
+def test_a_healthy_cache_round_trips_unchanged(tmp_path, minute_bars):
+    """Guards the tests above from passing because writing broke entirely."""
+    cache, key, path = _cache_with_month(tmp_path, minute_bars)
+    bars = cache.read(key, minute_bars.index[0], minute_bars.index[-1])
+
+    assert len(bars) == len(minute_bars)
+    assert not list(path.parent.glob("*.corrupt-*"))
