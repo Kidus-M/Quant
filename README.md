@@ -156,7 +156,9 @@ first time, so it is enforced structurally rather than by intention:
   central assumption becomes checkable.
 - Quality checks run on every load. **Structural failures** (duplicate timestamps,
   non-positive prices, high below low, bars stamped when the market is shut) are
-  dropped and written to `data/quarantine/` with the reason attached.
+  dropped and written to `data/quarantine/<adapter>/<symbol>_<resolution>/`
+  with the reason attached, merged into one parquet per calendar month so
+  that re-examining the same window costs nothing.
   **Suspicious-but-plausible bars** (zero volume, large sigma moves) are flagged,
   reported and *kept* by default — gold really does gap on a CPI print, and
   deleting the bars that hurt is the most flattering thing a backtester can do to

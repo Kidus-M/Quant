@@ -206,7 +206,10 @@ def load_dataset(
 
     clean, report = run_quality_checks(
         base_bars, cfg, calendar=calendar,
-        label=f"{provenance.symbol}_{base_resolution}",
+        # The adapter belongs in the label: it names the quarantine partition as
+        # well as the log prefix, and synthetic drops must never merge into the
+        # same file as real ones.
+        label=f"{provenance.adapter}/{provenance.symbol}_{base_resolution}",
         pads_outside_session=provenance.pads_outside_session,
     )
 
