@@ -3,7 +3,8 @@
 The rule here is "log and quarantine, never silently drop". Anything removed from
 the working set is written to the quarantine directory with the reason attached,
 so a suspicious backtest can always be traced back to the bars that were taken
-out from under it.
+out from under it. The store is month-partitioned per source and merged in
+place, so re-examining the same window costs nothing; see ``_write_quarantine``.
 
 There are two tiers, and the split matters:
 
@@ -41,8 +42,13 @@ class QualityReport:
     n_output: int = 0
     was_unsorted: bool = False
     counts: dict[str, int] = field(default_factory=dict)
-    quarantine_path: Path | None = None
+    quarantine_paths: tuple[Path, ...] = ()
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def quarantine_path(self) -> Path | None:
+        """The newest partition holding dropped rows, for callers wanting one path."""
+        return self.quarantine_paths[-1] if self.quarantine_paths else None
 
     @property
     def n_dropped(self) -> int:
@@ -63,8 +69,11 @@ class QualityReport:
             if count:
                 tier = "dropped" if reason in DROP_REASONS else "flagged, retained"
                 lines.append(f"  {reason}: {count} ({tier})")
-        if self.quarantine_path is not None:
-            lines.append(f"quarantined rows written to {self.quarantine_path}")
+        if self.quarantine_paths:
+            lines.append(
+                "quarantined rows merged into "
+                + ", ".join(str(path) for path in self.quarantine_paths)
+            )
         lines.extend(f"  note: {n}" for n in self.notes)
         return lines
 
@@ -165,7 +174,7 @@ def run_quality_checks(
         quarantined["reasons"] = [
             ",".join(np.asarray(drop_cols)[row]) for row in reason_matrix
         ]
-        report.quarantine_path = _write_quarantine(quarantined, cfg, label)
+        report.quarantine_paths = _write_quarantine(quarantined, cfg, label)
 
     clean = bars.loc[~drop_mask]
 
@@ -224,12 +233,47 @@ def run_quality_checks(
     return clean, report
 
 
-def _write_quarantine(rows: pd.DataFrame, cfg: Config, label: str) -> Path:
-    from src.config import resolve_path
+def _write_quarantine(rows: pd.DataFrame, cfg: Config, label: str) -> tuple[Path, ...]:
+    """Merge the dropped rows into one parquet per source and calendar month.
 
-    out_dir = resolve_path(cfg.get("data.quarantine_dir", "data/quarantine"))
+    This used to write a fresh timestamped dump on every call, which is right for
+    a one-shot research run and ruinous for the alert runner. The poller re-drops
+    the same ~21,000 out-of-session bars on every pass, so it produced 288
+    near-identical files a day -- measured at ~0.2 MB each, so ~50 MB a day and
+    1.5 GB a month -- on the same volume that holds the bar cache. A full disk is precisely how the truncated-parquet
+    outage described in ``cache.py`` starts, and the recovery path added for it
+    would then refetch from the vendor every five minutes while the disk stayed
+    full.
+
+    Month partitions merged on the index are bounded by how much data was
+    actually discarded instead of by how often the loader ran, so no retention
+    policy has to be invented and no evidence is thrown away. Re-dropping a bar
+    already on disk rewrites nothing, which leaves a live loop writing only the
+    bars it has newly discarded.
+    """
+    from src.config import resolve_path
+    from src.data.cache import read_parquet_or_set_aside, write_parquet_atomic
+
+    # ``label`` carries the adapter, so synthetic bars can never land in the same
+    # partition as real ones. Mixing them would make the quarantine itself the
+    # kind of evidence this project refuses to produce.
+    out_dir = resolve_path(cfg.get("data.quarantine_dir", "data/quarantine")) / label
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%S")
-    path = out_dir / f"{label}_{stamp}.parquet"
-    rows.to_parquet(path)
-    return path
+
+    written: list[Path] = []
+    for month, chunk in rows.groupby(rows.index.strftime("%Y-%m")):
+        path = out_dir / f"{month}.parquet"
+        merged = chunk
+        if path.exists():
+            existing = read_parquet_or_set_aside(path, kind="quarantine file")
+            if existing is not None:
+                merged = pd.concat([existing, chunk])
+                merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                if merged.equals(existing):
+                    # Nothing newly dropped this month. Report the partition that
+                    # holds the rows, but leave the file untouched.
+                    written.append(path)
+                    continue
+        write_parquet_atomic(merged, path)
+        written.append(path)
+    return tuple(written)

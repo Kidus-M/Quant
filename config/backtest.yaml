@@ -26,6 +26,10 @@ data:
   # `--set data.adapter=twelvedata` to run a backtest against real bars.
   adapter: synthetic         # synthetic | csv | parquet | twelvedata | oanda | dukascopy
   cache_dir: data/cache
+  # Dropped rows land in <dir>/<adapter>/<symbol>_<resolution>/<YYYY-MM>.parquet
+  # and are merged into those partitions in place. The size follows how much data
+  # was discarded, not how often the loader ran, so the live poller cannot fill
+  # the disk by re-examining the same window every five minutes.
   quarantine_dir: data/quarantine
 
   # Adapter-specific settings. Only the section for data.adapter is read.
