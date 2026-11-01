@@ -239,8 +239,8 @@ def _write_quarantine(rows: pd.DataFrame, cfg: Config, label: str) -> tuple[Path
     This used to write a fresh timestamped dump on every call, which is right for
     a one-shot research run and ruinous for the alert runner. The poller re-drops
     the same ~21,000 out-of-session bars on every pass, so it produced 288
-    near-identical files a day -- hundreds of megabytes -- on the same volume
-    that holds the bar cache. A full disk is precisely how the truncated-parquet
+    near-identical files a day -- measured at ~0.2 MB each, so ~50 MB a day and
+    1.5 GB a month -- on the same volume that holds the bar cache. A full disk is precisely how the truncated-parquet
     outage described in ``cache.py`` starts, and the recovery path added for it
     would then refetch from the vendor every five minutes while the disk stayed
     full.
