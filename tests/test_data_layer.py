@@ -159,6 +159,64 @@ def test_duplicate_timestamps_are_flagged_and_dropped(cfg, calendar):
     assert report.quarantine_path is not None and report.quarantine_path.exists()
 
 
+def test_quarantine_merges_rather_than_writing_a_file_per_pass(cfg, calendar):
+    """The alert runner re-drops the same bars every five minutes.
+
+    Each pass used to leave another timestamped dump behind -- 288 copies of the
+    same rows a day, on the volume that also holds the bar cache. Repeated passes
+    over one window must converge on a single partition.
+    """
+    bars = make_bars([1800, 1810, 1820], start="2023-06-06 10:00")
+    doubled = normalise_bars(pd.concat([bars, bars.iloc[[1]]]))
+    lenient = _lenient(cfg)
+
+    first = run_quality_checks(doubled, lenient, calendar=calendar, label="td/XAUUSD_1min")[1]
+    for _ in range(5):
+        report = run_quality_checks(doubled, lenient, calendar=calendar, label="td/XAUUSD_1min")[1]
+
+    assert report.quarantine_paths == first.quarantine_paths
+    files = sorted(report.quarantine_path.parent.glob("*.parquet"))
+    assert len(files) == 1, f"expected one partition per month, found {files}"
+
+
+def test_quarantine_keeps_rows_dropped_on_an_earlier_pass(cfg, calendar):
+    """Merging must not mean overwriting: earlier evidence has to survive."""
+    label = "td/XAUUSD_1min"
+    lenient = _lenient(cfg)
+
+    early = make_bars([1800, 1810, 1820], start="2023-06-06 10:00")
+    early_report = run_quality_checks(
+        normalise_bars(pd.concat([early, early.iloc[[1]]])), lenient,
+        calendar=calendar, label=label,
+    )[1]
+    before = pd.read_parquet(early_report.quarantine_path)
+
+    later = make_bars([1830, 1840, 1850], start="2023-06-06 14:00")
+    later_report = run_quality_checks(
+        normalise_bars(pd.concat([later, later.iloc[[1]]])), lenient,
+        calendar=calendar, label=label,
+    )[1]
+
+    assert later_report.quarantine_path == early_report.quarantine_path, "same month, same file"
+    after = pd.read_parquet(later_report.quarantine_path)
+    assert len(after) == len(before) + 1
+    assert before.index[0] in after.index
+
+
+def test_quarantine_partitions_by_adapter(cfg, calendar):
+    """A synthetic drop must never land in the same file as a real one."""
+    bars = make_bars([1800, 1810, 1820], start="2023-06-06 10:00")
+    doubled = normalise_bars(pd.concat([bars, bars.iloc[[1]]]))
+    lenient = _lenient(cfg)
+
+    synthetic = run_quality_checks(
+        doubled, lenient, calendar=calendar, label="synthetic/XAUUSD_1min")[1]
+    real = run_quality_checks(
+        doubled, lenient, calendar=calendar, label="twelvedata/XAUUSD_1min")[1]
+
+    assert synthetic.quarantine_path != real.quarantine_path
+
+
 def test_non_monotonic_index_is_sorted_and_reported(cfg, calendar):
     bars = make_bars([1800, 1810, 1820], start="2023-06-06 10:00")
     shuffled = bars.iloc[[2, 0, 1]]
